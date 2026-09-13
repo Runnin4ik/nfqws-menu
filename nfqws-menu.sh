@@ -10,14 +10,20 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.26"
+SCRIPT_VERSION="0.6.27"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
 STRATEGIES_API="https://api.github.com/repos/rndnaame/nfqws-menu/contents/strategies"
 
-# Не трогаем LD_LIBRARY_PATH: глобальный export /opt ломает ndmc (OpenSSL),
-# а system-only ломает Entware wget. Без export окружение как в обычной SSH.
+# LD_LIBRARY_PATH не экспортируем глобально: /opt ломает ndmc (OpenSSL),
+# system-only ломает Entware wget/curl. Для ndmc — отдельная обёртка.
+# Нужно при запуске через CLI Keenetic (exec sh / telnet) и OPKG hooks,
+# где LD_LIBRARY_PATH=/opt/lib:/opt/usr/lib:/lib:/usr/lib.
+ndmc_cli() {
+  # системные libs первыми; иначе ndmc тянет OpenSSL из Entware → system failed
+  LD_LIBRARY_PATH=/lib:/usr/lib command ndmc -c "$@"
+}
 
 # ---------------------------------------------------------------------------
 # Цвета
@@ -1233,7 +1239,7 @@ show_dns_servers() {
     return 1
   fi
 
-  ndmc -c "show dns-proxy" 2>/dev/null | awk -v c_reset="$NC" \
+  ndmc_cli "show dns-proxy" 2>/dev/null | awk -v c_reset="$NC" \
     -v c_bold="$BOLD" -v c_cyan="$CYAN" -v c_green="$GREEN" \
     -v c_yellow="$YELLOW" -v c_magenta="$MAGENTA" -v c_dim="$DIM" '
     BEGIN {
@@ -1332,7 +1338,7 @@ show_dns_servers() {
 
 dns_save_config() {
   printf '%s' "Сохранение конфигурации..."
-  if ndmc -c "system configuration save" > /dev/null 2>&1; then
+  if ndmc_cli "system configuration save" > /dev/null 2>&1; then
     printf ' %s\n' "${GREEN}[ГОТОВО]${NC}"
   else
     printf ' %s\n' "${RED}[ОШИБКА]${NC}"
@@ -1348,7 +1354,7 @@ apply_dot() {
   [ -n "$sni" ] && cmd="$cmd sni $sni"
   [ -n "$domain" ] && cmd="$cmd domain $domain"
   printf '%s\n' "${CYAN}Применение DoT ($ip):${NC} ndmc -c \"$cmd\""
-  ndmc -c "$cmd" > /dev/null 2>&1 || warn "ndmc вернул ошибку при добавлении DoT $ip"
+  ndmc_cli "$cmd" > /dev/null 2>&1 || warn "ndmc вернул ошибку при добавлении DoT $ip"
 }
 
 apply_doh() {
@@ -1356,7 +1362,7 @@ apply_doh() {
   cmd="dns-proxy https upstream $uri"
   [ -n "$domain" ] && cmd="$cmd domain $domain"
   printf '%s\n' "${CYAN}Применение DoH ($uri):${NC} ndmc -c \"$cmd\""
-  ndmc -c "$cmd" > /dev/null 2>&1 || warn "ndmc вернул ошибку при добавлении DoH $uri"
+  ndmc_cli "$cmd" > /dev/null 2>&1 || warn "ndmc вернул ошибку при добавлении DoH $uri"
 }
 
 # Data-driven DoT: N|label|ip|sni|port
@@ -1616,7 +1622,7 @@ remove_dns_menu() {
   local tmp_list="/tmp/dns_rem_list.txt"
   rm -f "$tmp_list"
 
-  ndmc -c "show dns-proxy" 2>/dev/null | awk '
+  ndmc_cli "show dns-proxy" 2>/dev/null | awk '
     /server-tls:/ {
       if (in_dot && addr != "") {
         p = (port != "") ? port : "853"
@@ -1751,7 +1757,7 @@ remove_dns_menu() {
       continue
     fi
     printf '%s\n' "${RED}Удаление:${NC} ndmc -c \"$cmd\""
-    if ndmc -c "$cmd" > /dev/null 2>&1; then
+    if ndmc_cli "$cmd" > /dev/null 2>&1; then
       removed_any=1
     else
       warn "ndmc не смог удалить: $target"
@@ -1880,7 +1886,7 @@ menu_update_hosts() {
       [ -z "$domain" ] && continue
       cmd="no ip host $domain"
       printf '%s\n' "${CYAN}  ndmc -c \"$cmd\"${NC}"
-      if ndmc -c "$cmd" > /dev/null 2>&1; then
+      if ndmc_cli "$cmd" > /dev/null 2>&1; then
         removed=$((removed + 1))
       else
         warn "  ошибка: $domain"
@@ -1982,7 +1988,7 @@ $name"
     [ -z "$ip" ] || [ -z "$domain" ] && continue
     cmd="ip host $domain $ip"
     printf '%s\n' "${CYAN}  ndmc -c \"$cmd\"${NC}"
-    if ndmc -c "$cmd" > /dev/null 2>&1; then
+    if ndmc_cli "$cmd" > /dev/null 2>&1; then
       added=$((added + 1))
     else
       warn "  ошибка: $domain → $ip"
