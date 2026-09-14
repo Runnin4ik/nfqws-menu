@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.27"
+SCRIPT_VERSION="0.6.28"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -331,7 +331,8 @@ port_is_open() {
 proc_running() {
   local name="$1"
   [ -n "$PROC_CACHE" ] || refresh_proc_cache
-  printf '%s\n' "$PROC_CACHE" | grep -q "$name"
+  # -- и -F: имя может начинаться с '-' (Sxx-xxx → svc=-xxx) → иначе grep видит опцию
+  printf '%s\n' "$PROC_CACHE" | grep -qF -- "$name"
 }
 
 # kind: nfqws|nfqws2|web|usque|tg-ws-proxy → 1 если «запущен»
