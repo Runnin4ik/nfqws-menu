@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.28"
+SCRIPT_VERSION="0.6.29"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -186,22 +186,32 @@ fetch_url() {
   fi
 }
 
-# Скачать URL в файл (curl → wget fallback)
+# Скачать URL в файл (curl → wget fallback).
+# При ошибке/404/пустом ответе файл не оставляем.
 download_file() {
-  local url="$1" dest="$2"
-  mkdir -p "$(dirname "$dest")"
+  local url="$1" dest="$2" ok=0
+  mkdir -p "$(dirname "$dest")" 2>/dev/null || true
+  rm -f "$dest"
   if command -v curl >/dev/null 2>&1; then
     if curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' "$url" -o "$dest" 2>/dev/null; then
-      return 0
+      ok=1
+    else
+      rm -f "$dest"
     fi
-    # curl есть, но упал (часто: libnghttp2.so.14 / OpenSSL) — пробуем wget
-    rm -f "$dest"
   fi
-  if command -v wget >/dev/null 2>&1; then
-    wget -qO "$dest" --no-cache "$url" 2>/dev/null || wget -qO "$dest" "$url"
-  else
-    return 1
+  if [ "$ok" -eq 0 ] && command -v wget >/dev/null 2>&1; then
+    if wget -qO "$dest" --no-cache "$url" 2>/dev/null || wget -qO "$dest" "$url" 2>/dev/null; then
+      ok=1
+    else
+      rm -f "$dest"
+    fi
   fi
+  # 404/пустой ответ: wget иногда пишет 0-байтный файл при ошибке
+  if [ "$ok" -eq 1 ] && [ -f "$dest" ] && [ -s "$dest" ]; then
+    return 0
+  fi
+  rm -f "$dest"
+  return 1
 }
 
 # curl|wget | sh для удалённых install.sh
@@ -678,6 +688,7 @@ check_conf_files() {
   for path in $missing_list; do
     name=$(basename "$path")
     mkdir -p "$(dirname "$path")"
+    # auto.list заполняется демоном — пустой допустим только для него
     if [ "$repo_sub" = "lists" ] && [ "$name" = "auto.list" ]; then
       touch "$path"
       info "  создан пустой $path (заполняется демоном)"
@@ -686,17 +697,15 @@ check_conf_files() {
     info "Скачивание $name → $path"
     if download_file "${RAW_BASE}/strategies/${repo_sub}/${name}" "$path"; then
       info "  готово"
-    elif [ "$repo_sub" = "lists" ]; then
-      touch "$path"
-      warn "  нет в репозитории — создан пустой $path"
     else
-      warn "  не удалось скачать $name (нет в репозитории?)"
+      rm -f "$path"
+      warn "  нет в репозитории / ошибка загрузки — файл не создан ($name)"
     fi
   done
 }
 
 check_blobs() { check_conf_files "blobs" "$2" extract_blob_paths "blobs" "Скачать отсутствующие blobs из strategies/blobs/?"; }
-check_lists() { check_conf_files "lists" "$2" extract_list_paths "lists" "Скачать/создать отсутствующие lists?"; }
+check_lists() { check_conf_files "lists" "$2" extract_list_paths "lists" "Скачать отсутствующие lists из strategies/lists/?"; }
 
 update_lists() {
   local ver="$1" dest_dir name
