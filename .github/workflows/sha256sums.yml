@@ -2,7 +2,7 @@
 # - SHA256SUMS              — все отслеживаемые файлы (пути от корня)
 # - strategies/blobs/SHA256SUMS — только *.bin (имена файлов, удобно для nfqws-menu)
 #
-# Триггеры: push в main (любые файлы кроме самих SUMS), ручной запуск.
+# Триггеры: push в main, раз в сутки, ручной запуск.
 # Коммит только если содержимое SUMS реально изменилось → без циклов.
 
 name: Update SHA256SUMS
@@ -14,6 +14,9 @@ on:
       - "SHA256SUMS"
       - "strategies/blobs/SHA256SUMS"
       - ".github/workflows/sha256sums.yml"
+  schedule:
+    # Раз в день, 03:15 UTC (низкая нагрузка на Actions)
+    - cron: "15 3 * * *"
   workflow_dispatch:
 
 permissions:
@@ -28,9 +31,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
+        # v5+ — runtime Node.js 24 (v4 на Node 20 → deprecation warning)
         uses: actions/checkout@v5
         with:
-          # Нужен полный history не обязателен; token для push от GITHUB_TOKEN
           fetch-depth: 1
 
       - name: Generate SHA256SUMS (repo root)
