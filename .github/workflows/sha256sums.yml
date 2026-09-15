@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           # Нужен полный history не обязателен; token для push от GITHUB_TOKEN
           fetch-depth: 1
