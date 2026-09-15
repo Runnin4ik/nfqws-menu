@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.32"
+SCRIPT_VERSION="0.6.33"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -978,7 +978,7 @@ update_lists() {
 }
 
 apply_strategy() {
-  local ver="$1" conf_name="$2" conf_path conf_dest tmp
+  local ver="$1" conf_name="$2" conf_path conf_dest tmp had_rkn=0 rkn_path
   conf_dest=$(nfqws_conf_path "$ver")
 
   if [ "$conf_name" = "default" ]; then
@@ -994,6 +994,12 @@ apply_strategy() {
   if [ ! -f "$conf_dest" ]; then
     error "Конфиг $conf_dest не найден. Сначала установите соответствующий пакет."
     return 1
+  fi
+
+  # Запоминаем привязку rkn.list в MODE_LIST — стратегия перезапишет весь конфиг
+  if conf_has_rkn_hostlist "$conf_dest" "$ver"; then
+    had_rkn=1
+    info "В текущем конфиге есть привязка rkn.list — будет восстановлена после смены стратегии."
   fi
 
   info "Скачивание стратегии: $conf_name"
@@ -1041,6 +1047,18 @@ apply_strategy() {
     update_lists "$ver"
   else
     info "Принудительное обновление lists пропущено."
+  fi
+
+  # Восстановить привязку rkn.list в MODE_LIST, если она была до смены стратегии
+  if [ "$had_rkn" -eq 1 ]; then
+    echo
+    info "=== Восстановление rkn.list в MODE_LIST ==="
+    if inject_rkn_into_mode_list "$ver" "$conf_dest"; then
+      rkn_path=$(rkn_list_path "$ver" 2>/dev/null || true)
+      if [ -n "$rkn_path" ] && [ ! -f "$rkn_path" ]; then
+        warn "Файл $rkn_path отсутствует — скачайте через пункт меню «rkn.list»."
+      fi
+    fi
   fi
 
   echo
@@ -1178,6 +1196,101 @@ update_ipset_list() {
 # ---------------------------------------------------------------------------
 RKN_LIST_URL="https://raw.githubusercontent.com/IndeecFOX/zapret4rocket/refs/heads/master/extra_strats/TCP/RKN/List.txt"
 
+# Аргумент --hostlist=.../rkn.list для указанной версии nfqws
+rkn_hostlist_arg() {
+  case "$1" in
+    1) echo "--hostlist=/opt/etc/nfqws/rkn.list" ;;
+    2) echo "--hostlist=/opt/etc/nfqws2/lists/rkn.list" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Путь к rkn.list для версии
+rkn_list_path() {
+  case "$1" in
+    1) echo "/opt/etc/nfqws/rkn.list" ;;
+    2) echo "/opt/etc/nfqws2/lists/rkn.list" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Есть ли в конфиге привязка rkn.list (MODE_LIST / hostlist)
+conf_has_rkn_hostlist() {
+  local conf="$1" ver="$2" arg
+  arg=$(rkn_hostlist_arg "$ver") || return 1
+  [ -f "$conf" ] || return 1
+  grep -qF -- "$arg" "$conf" 2>/dev/null
+}
+
+# Вставить --hostlist=.../rkn.list в MODE_LIST конфига (идемпотентно).
+# Возвращает 0 если уже было / успешно добавлено, 1 при ошибке.
+# $1=ver  $2=conf (опционально; по умолчанию nfqws_conf_path)
+inject_rkn_into_mode_list() {
+  local ver="$1" conf="${2:-}" hostlist_arg user_list tmp_conf
+  hostlist_arg=$(rkn_hostlist_arg "$ver") || return 1
+  [ -z "$conf" ] && conf=$(nfqws_conf_path "$ver")
+  [ -f "$conf" ] || { warn "Конфиг не найден: $conf — MODE_LIST не обновлён."; return 1; }
+
+  case "$ver" in
+    1) user_list="/opt/etc/nfqws/user.list" ;;
+    2) user_list="/opt/etc/nfqws2/lists/user.list" ;;
+  esac
+
+  # уже есть
+  if grep -qF -- "$hostlist_arg" "$conf" 2>/dev/null; then
+    info "MODE_LIST уже содержит $hostlist_arg"
+    return 0
+  fi
+
+  if grep -qE '^[[:space:]]*MODE_LIST=' "$conf" 2>/dev/null; then
+    backup_file "$conf"
+    # Вставляем --hostlist=...rkn.list перед закрывающей кавычкой.
+    # awk надёжнее busybox sed (пробелы, пустые кавычки, CRLF, single quotes).
+    tmp_conf="/tmp/nfqws-mode-$$.conf"
+    awk -v arg="$hostlist_arg" '
+      BEGIN { done=0 }
+      /^[[:space:]]*MODE_LIST=/ && !done {
+        line=$0
+        sub(/\r$/, "", line)
+        # MODE_LIST="content"  → MODE_LIST="content arg"  (или пустые кавычки)
+        if (match(line, /^[[:space:]]*MODE_LIST="/)) {
+          prefix = substr(line, 1, RSTART+RLENGTH-1)  # включая открывающую "
+          rest = substr(line, RSTART+RLENGTH)
+          if (match(rest, /"/)) {
+            content = substr(rest, 1, RSTART-1)
+            gsub(/[ \t]+$/, "", content)
+            if (content == "")
+              print prefix arg "\""
+            else
+              print prefix content " " arg "\""
+          } else {
+            print line " " arg
+          }
+        } else {
+          print line " " arg
+        }
+        done=1
+        next
+      }
+      { print }
+    ' "$conf" > "$tmp_conf" && mv "$tmp_conf" "$conf"
+    if grep -qF -- "$hostlist_arg" "$conf" 2>/dev/null; then
+      info "В MODE_LIST восстановлено/добавлено: $hostlist_arg"
+      return 0
+    fi
+    warn "Не удалось изменить MODE_LIST автоматически — добавьте вручную:"
+    warn "  MODE_LIST=\"... $hostlist_arg\""
+    rm -f "$tmp_conf"
+    return 1
+  fi
+
+  # MODE_LIST отсутствует — создаём с user.list + rkn
+  backup_file "$conf"
+  printf '\nMODE_LIST="--hostlist=%s %s"\n' "$user_list" "$hostlist_arg" >> "$conf"
+  info "MODE_LIST создан с user.list и rkn.list"
+  return 0
+}
+
 update_rkn_list() {
   need_nfqws_installed || return
   pick_nfqws_ver 1 || return
@@ -1234,25 +1347,11 @@ update_rkn_list() {
   # Применить к выбранной версии (или обеим)
   apply_rkn_for_ver() {
     local ver="$1"
-    local dest hostlist_arg conf init_script user_list need_restart=0
+    local dest init_script conf need_restart=0 had_rkn=0
 
-    case "$ver" in
-      1)
-        dest="/opt/etc/nfqws/rkn.list"
-        hostlist_arg="--hostlist=/opt/etc/nfqws/rkn.list"
-        conf="/opt/etc/nfqws/nfqws.conf"
-        init_script="/opt/etc/init.d/S51nfqws"
-        user_list="/opt/etc/nfqws/user.list"
-        ;;
-      2)
-        dest="/opt/etc/nfqws2/lists/rkn.list"
-        hostlist_arg="--hostlist=/opt/etc/nfqws2/lists/rkn.list"
-        conf="/opt/etc/nfqws2/nfqws2.conf"
-        init_script="/opt/etc/init.d/S51nfqws2"
-        user_list="/opt/etc/nfqws2/lists/user.list"
-        ;;
-      *) return 1 ;;
-    esac
+    dest=$(rkn_list_path "$ver") || return 1
+    init_script=$(nfqws_init_path "$ver")
+    conf=$(nfqws_conf_path "$ver")
 
     if [ "$skip_download" -eq 0 ]; then
       mkdir -p "$(dirname "$dest")"
@@ -1261,64 +1360,17 @@ update_rkn_list() {
       need_restart=1
     fi
 
-    if [ ! -f "$conf" ]; then
-      warn "Конфиг не найден: $conf — MODE_LIST не обновлён."
-      if [ "$need_restart" -eq 1 ]; then
-        service_restart "$init_script"
-        info "Сервис перезапущен ($init_script)."
-      fi
-      return 0
-    fi
+    # Была ли привязка до inject (чтобы не перезапускать зря)
+    conf_has_rkn_hostlist "$conf" "$ver" && had_rkn=1
 
-    # -- перед паттерном: иначе grep воспринимает --hostlist=... как свою опцию
-    if grep -qF -- "$hostlist_arg" "$conf" 2>/dev/null; then
-      info "MODE_LIST уже содержит $hostlist_arg"
-    elif grep -qE '^[[:space:]]*MODE_LIST=' "$conf" 2>/dev/null; then
-      backup_file "$conf"
-      # Вставляем --hostlist=...rkn.list перед закрывающей кавычкой.
-      # awk надёжнее busybox sed (пробелы, пустые кавычки, CRLF, single quotes).
-      local tmp_conf="/tmp/nfqws-mode-$$.conf"
-      awk -v arg="$hostlist_arg" '
-        BEGIN { done=0 }
-        /^[[:space:]]*MODE_LIST=/ && !done {
-          line=$0
-          sub(/\r$/, "", line)
-          # MODE_LIST="content"  → MODE_LIST="content arg"  (или пустые кавычки)
-          if (match(line, /^[[:space:]]*MODE_LIST="/)) {
-            prefix = substr(line, 1, RSTART+RLENGTH-1)  # включая открывающую "
-            rest = substr(line, RSTART+RLENGTH)
-            # rest = content..."
-            if (match(rest, /"/)) {
-              content = substr(rest, 1, RSTART-1)
-              gsub(/[ \t]+$/, "", content)
-              if (content == "")
-                print prefix arg "\""
-              else
-                print prefix content " " arg "\""
-            } else {
-              print line " " arg
-            }
-          } else {
-            print line " " arg
-          }
-          done=1
-          next
-        }
-        { print }
-      ' "$conf" > "$tmp_conf" && mv "$tmp_conf" "$conf"
-      if grep -qF -- "$hostlist_arg" "$conf" 2>/dev/null; then
-        warn "В MODE_LIST добавлено: $hostlist_arg"
+    inject_rkn_into_mode_list "$ver" "$conf" || true
+
+    # Перезапуск: обновили файл списка ИЛИ только что добавили в MODE_LIST
+    if [ "$need_restart" -eq 1 ] || [ "$had_rkn" -eq 0 ]; then
+      # had_rkn=0 → inject мог добавить (или conf отсутствовал) → restart
+      if [ "$had_rkn" -eq 0 ] && conf_has_rkn_hostlist "$conf" "$ver"; then
         need_restart=1
-      else
-        warn "Не удалось изменить MODE_LIST автоматически — добавьте вручную:"
-        warn "  MODE_LIST=\"... $hostlist_arg\""
-        rm -f "$tmp_conf"
       fi
-    else
-      backup_file "$conf"
-      printf '\nMODE_LIST="--hostlist=%s %s"\n' "$user_list" "$hostlist_arg" >> "$conf"
-      info "MODE_LIST создан с user.list и rkn.list"
-      need_restart=1
     fi
 
     if [ "$need_restart" -eq 1 ]; then
