@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.29"
+SCRIPT_VERSION="0.6.30"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -613,8 +613,23 @@ detect_isp_interface() {
   echo "$iface"
 }
 
+# Проверка глобального IPv6 (2a00::/12) на интерфейсе.
+# Возвращает 0 (успех) если найден адрес вида 2a00*, иначе 1.
+iface_has_global_ipv6() {
+  local iface="$1"
+  [ -z "$iface" ] && return 1
+  if command -v ip >/dev/null 2>&1; then
+    # ip -6: "inet6 2a00:...." scope global
+    ip -6 addr show dev "$iface" 2>/dev/null | grep -qE 'inet6[[:space:]]+2a00'
+    return $?
+  fi
+  # fallback: ifconfig (BusyBox) — "inet6 addr: 2a00:...."
+  ifconfig "$iface" 2>/dev/null | grep -qiE 'inet6[[:space:]]+addr:[[:space:]]*2a00'
+  return $?
+}
+
 fix_isp_interface() {
-  local conf="$1" detected current
+  local conf="$1" detected current ipv6_val current_ipv6
   detected=$(detect_isp_interface)
   if [ -z "$detected" ]; then
     warn "Не удалось определить интерфейс провайдера (route/ip route)."
@@ -626,18 +641,46 @@ fix_isp_interface() {
   [ -n "$current" ] && info "В конфиге сейчас: ISP_INTERFACE=\"$current\""
   if [ "$current" = "$detected" ]; then
     info "ISP_INTERFACE уже совпадает с интерфейсом провайдера."
-    return 0
-  fi
-  if ! confirm_yes "Установить ISP_INTERFACE=\"$detected\"?"; then
-    warn "ISP_INTERFACE не изменён."
-    return 0
-  fi
-  if grep -qE '^ISP_INTERFACE=' "$conf" 2>/dev/null; then
-    sed -i "s|^ISP_INTERFACE=.*|ISP_INTERFACE=\"$detected\"|" "$conf"
   else
-    printf 'ISP_INTERFACE="%s"\n' "$detected" | cat - "$conf" > "${conf}.new" && mv "${conf}.new" "$conf"
+    if ! confirm_yes "Установить ISP_INTERFACE=\"$detected\"?"; then
+      warn "ISP_INTERFACE не изменён."
+    else
+      if grep -qE '^ISP_INTERFACE=' "$conf" 2>/dev/null; then
+        sed -i "s|^ISP_INTERFACE=.*|ISP_INTERFACE=\"$detected\"|" "$conf"
+      else
+        printf 'ISP_INTERFACE="%s"\n' "$detected" | cat - "$conf" > "${conf}.new" && mv "${conf}.new" "$conf"
+      fi
+      info "ISP_INTERFACE=\"$detected\" записан в $conf"
+    fi
   fi
-  info "ISP_INTERFACE=\"$detected\" записан в $conf"
+
+  # --- IPV6_ENABLED: наличие глобального IPv6 (2a00*) на интерфейсе провайдера ---
+  echo
+  info "=== Проверка IPv6 на $detected ==="
+  if iface_has_global_ipv6 "$detected"; then
+    ipv6_val=1
+    info "Найден глобальный IPv6-адрес (2a00*) на $detected → IPV6_ENABLED=1"
+  else
+    ipv6_val=0
+    info "Глобальный IPv6 (2a00*) на $detected не найден → IPV6_ENABLED=0"
+  fi
+
+  current_ipv6=$(grep -E '^IPV6_ENABLED=' "$conf" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  if [ "$current_ipv6" = "$ipv6_val" ]; then
+    info "IPV6_ENABLED уже = $ipv6_val — без изменений."
+  else
+    if grep -qE '^IPV6_ENABLED=' "$conf" 2>/dev/null; then
+      sed -i "s|^IPV6_ENABLED=.*|IPV6_ENABLED=$ipv6_val|" "$conf"
+    else
+      # добавляем после ISP_INTERFACE, если есть, иначе в начало
+      if grep -qE '^ISP_INTERFACE=' "$conf" 2>/dev/null; then
+        sed -i "/^ISP_INTERFACE=/a IPV6_ENABLED=$ipv6_val" "$conf"
+      else
+        printf 'IPV6_ENABLED=%s\n' "$ipv6_val" | cat - "$conf" > "${conf}.new" && mv "${conf}.new" "$conf"
+      fi
+    fi
+    info "IPV6_ENABLED=$ipv6_val записан в $conf"
+  fi
 }
 
 extract_blob_paths() {
@@ -770,7 +813,7 @@ apply_strategy() {
   rm -f "$tmp"
 
   echo
-  info "=== Проверка ISP_INTERFACE ==="
+  info "=== Проверка ISP_INTERFACE / IPV6_ENABLED ==="
   fix_isp_interface "$conf_dest"
 
   echo
