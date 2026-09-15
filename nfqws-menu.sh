@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.31"
+SCRIPT_VERSION="0.6.32"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -656,16 +656,69 @@ install_web() {
 # ---------------------------------------------------------------------------
 # 3. Стратегии
 # ---------------------------------------------------------------------------
-list_strategies() {
-  # Как в 0.5.16: curl/wget | grep в каждой ветке (на busybox ash так надёжнее).
+
+# ---------------------------------------------------------------------------
+# Корневой SHA256SUMS (список strategies/nfqwsN/*.conf без GitHub API)
+# ---------------------------------------------------------------------------
+REPO_SHA256SUMS_URL="${RAW_BASE}/SHA256SUMS"
+REPO_SHA256SUMS_CACHE="/tmp/nfqws-repo-SHA256SUMS"
+
+ensure_repo_sha256sums() {
+  local ttl=3600 now age
+  now=$(date +%s 2>/dev/null || echo 0)
+  if [ -f "$REPO_SHA256SUMS_CACHE" ] && [ -s "$REPO_SHA256SUMS_CACHE" ]; then
+    if age=$(stat -c %Y "$REPO_SHA256SUMS_CACHE" 2>/dev/null); then
+      [ $((now - age)) -lt "$ttl" ] && return 0
+    elif age=$(date -r "$REPO_SHA256SUMS_CACHE" +%s 2>/dev/null); then
+      [ $((now - age)) -lt "$ttl" ] && return 0
+    else
+      return 0
+    fi
+  fi
+  if download_file "$REPO_SHA256SUMS_URL" "$REPO_SHA256SUMS_CACHE"; then
+    return 0
+  fi
+  [ -s "$REPO_SHA256SUMS_CACHE" ] && return 0
+  return 1
+}
+
+# Имена *.conf из strategies/<ver>/ по корневому SHA256SUMS
+list_strategies_from_sums() {
   local ver="$1"
-  local url="${STRATEGIES_API}/${ver}"
+  [ -s "$REPO_SHA256SUMS_CACHE" ] || return 1
+  awk -v pref="strategies/${ver}/" '
+    NF >= 2 {
+      p = $2
+      # только strategies/nfqwsN/name.conf (без подкаталогов)
+      if (index(p, pref) != 1) next
+      rest = substr(p, length(pref) + 1)
+      if (rest ~ /\//) next
+      if (rest ~ /\.conf$/) print rest
+    }
+  ' "$REPO_SHA256SUMS_CACHE" | sort -u
+}
+
+list_strategies() {
+  # 1) корневой SHA256SUMS (без API)  2) GitHub Contents API fallback
+  local ver="$1"
+  local list="" url
+
+  if ensure_repo_sha256sums; then
+    list=$(list_strategies_from_sums "$ver" || true)
+  fi
+  if [ -n "$list" ]; then
+    printf '%s\n' "$list"
+    return 0
+  fi
+
+  url="${STRATEGIES_API}/${ver}"
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL "$url" 2>/dev/null | grep -o '"name": *"[^"]*\.conf"' | sed 's/.*"\([^"]*\)".*/\1/'
   else
     wget -qO- "$url" 2>/dev/null | grep -o '"name": *"[^"]*\.conf"' | sed 's/.*"\([^"]*\)".*/\1/'
   fi
 }
+
 
 detect_isp_interface() {
   local iface=""
@@ -1016,7 +1069,7 @@ menu_strategy() {
   info "Доступные стратегии ($dir):"
   list=$(list_strategies "$dir" || true)
   if [ -z "$list" ]; then
-    warn "Не удалось получить список с GitHub API (сеть / rate limit / нет curl|wget)."
+    warn "Не удалось получить список стратегий (SHA256SUMS / GitHub API)."
     warn "Будет доступен только default из официального репозитория nfqws."
   fi
 
@@ -2704,22 +2757,39 @@ parse_fake_blobs() {
 }
 
 list_repo_blobs() {
+  # 1) strategies/blobs/SHA256SUMS  2) GitHub API  3) встроенный fallback
   local cache="/tmp/nfqws-repo-blobs.list"
-  local now age=999999
+  local now age=999999 list
+
   now=$(date +%s 2>/dev/null || echo 0)
   if [ -f "$cache" ]; then
     age=$((now - $(stat -c %Y "$cache" 2>/dev/null || echo 0)))
   fi
-  if [ -f "$cache" ] && [ "$age" -lt 3600 ]; then
+  if [ -f "$cache" ] && [ "$age" -lt 3600 ] && [ -s "$cache" ]; then
     cat "$cache"
     return 0
   fi
+
+  if ensure_blobs_sha256sums; then
+    list=$(awk 'NF >= 2 {
+      n = $2
+      sub(/.*\//, "", n)
+      if (n ~ /\.bin$/) print n
+    }' "$BLOBS_SHA256SUMS_CACHE" 2>/dev/null | sort -u)
+    if [ -n "$list" ]; then
+      printf '%s\n' "$list" > "$cache"
+      cat "$cache"
+      return 0
+    fi
+  fi
+
   if fetch_url "${STRATEGIES_API}/blobs" 2>/dev/null | \
       grep -oE '"name":[[:space:]]*"[^"]+\.bin"' | \
-      sed 's/.*"\([^"]*\.bin\)".*/\1/' | sort -u > "$cache"; then
+      sed 's/.*"\([^"]*\.bin\)".*/\1/' | sort -u > "$cache" && [ -s "$cache" ]; then
     cat "$cache"
     return 0
   fi
+
   printf '%s\n' \
     ACTIVE_DISCORD_UDP.bin ACTIVE_GAME_UDP.bin \
     quic_initial_4pda_to.bin quic_initial_5ka_ru.bin quic_initial_rutube_ru.bin \
@@ -2730,6 +2800,7 @@ list_repo_blobs() {
     tls_clienthello_max_ru.bin tls_clienthello_sochi_park.bin \
     tls_clienthello_www_google_com.bin
 }
+
 
 menu_change_fake_blob() {
   need_nfqws_installed || return 0
