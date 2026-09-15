@@ -1,7 +1,74 @@
-# zapret-discord-youtube 1.10.2 -> nfqws1
+# NFQWS1 — конфигурации в стиле NFQWS2
 
-Direct ports of the 21 non-default Flowseal strategies. Profiles are kept in original order in `NFQWS_ARGS_CUSTOM`.
+Переработан только порт NFQWS первого поколения из предоставленного архива.
+Все 21 конфигурация разнесены по блокам NFQWS_ARGS (HTTP/S), NFQWS_ARGS_QUIC,
+NFQWS_ARGS_UDP, MODE_LIST/ALL/AUTO, NFQWS_EXTRA_ARGS и NFQWS_ARGS_CUSTOM.
+NFQWS2 в общем архиве сохранён побайтно, включая конфиги и README.
 
-Copy `blobs/` to `/opt/etc/nfqws/blobs/`, `lists/` to `/opt/etc/nfqws/lists/`, choose a `.conf` as `/opt/etc/nfqws/nfqws.conf`, set `ISP_INTERFACE`, then restart nfqws-keenetic.
+## Keenetic / Netcraze
 
-GameFilter profiles are left disabled, as in Flowseal by default.
+Для уже установленного пакета nfqws-keenetic первого поколения:
+
+1. Скопируйте содержимое blobs/ в /opt/etc/nfqws/blobs/.
+2. Скопируйте содержимое lists/ в /opt/etc/nfqws/lists/. Сохраните свои списки,
+   если такие файлы уже есть на роутере.
+3. Сохраните текущий /opt/etc/nfqws/nfqws.conf. Выберите один .conf из этого
+   комплекта и скопируйте его как /opt/etc/nfqws/nfqws.conf.
+4. Укажите ISP_INTERFACE и перенесите свои настройки политики, IPv6 и очереди
+   из старого конфига. Значения по умолчанию сохранены из предоставленного порта:
+   eth3, IPV6_ENABLED=0, NFQUEUE_NUM=200.
+5. Проверьте конфиг командами ниже, затем перезапустите:
+   /opt/etc/init.d/S51nfqws restart
+
+Проверка на роутере без запуска перехвата:
+
+```sh
+(
+  . /opt/etc/nfqws/nfqws.conf
+  set -f
+  nfqws --dry-run $NFQWS_ARGS_CUSTOM --new $NFQWS_ARGS_UDP --new \
+    $NFQWS_ARGS_QUIC $NFQWS_EXTRA_ARGS --new $NFQWS_ARGS $NFQWS_EXTRA_ARGS
+)
+```
+
+При unknown option нужна сборка первого поколения, поддерживающая параметры
+выбранной стратегии. Движок и служба не включены в этот комплект.
+
+## OpenWrt
+
+Отдельный архив openwrt содержит те же 21 конфигурацию для пакета nfqws-keenetic
+на OpenWrt: пути /etc/nfqws и /var/log вместо /opt/etc/nfqws и /opt/var/log.
+Разместите blobs/ и lists/ в /etc/nfqws, выбранный конфиг — в
+/etc/nfqws/nfqws.conf. Выставьте свой WAN-интерфейс. В проверке выше замените
+/opt/etc/nfqws/nfqws.conf на /etc/nfqws/nfqws.conf, затем используйте
+/etc/init.d/nfqws-keenetic restart.
+Это формат пакета nfqws-keenetic; обычный bol-van/zapret использует другой конфиг.
+
+## Особенности сохранения стратегий
+
+- NFQWS_ARGS_IPSET оставлен пустым намеренно: механизм службы автоматически
+  дублирует основную HTTP(S)/QUIC-стратегию на IP. В исходнике у TCP IP другой
+  набор портов (включая 8443), а в ALT7 и ALT9 отличаются сами параметры.
+  FLOWSEAL_IPSET_ARGS содержит IP-списки, точные IP-профили остаются в CUSTOM.
+  Это сохраняет смысл исходного порта при раздельных основных блоках.
+- CUSTOM обрабатывается первым. Исключения user.list/user-extra.list в IP TCP
+  сохраняют приоритет основного профиля для доменов из этих списков.
+- ALT5 сохраняет TCP IPv4 без hostlist; списки ограничивают только QUIC.
+  NFQWS_EXTRA_ARGS поэтому пустой. Это особенность исходной ALT5.
+- EXP сохраняет приоритет QUIC на любом перехваченном порту перед Discord UDP:
+  CUSTOM первым подставляет NFQWS_ARGS_QUIC и NFQWS_EXTRA_ARGS.
+- По умолчанию MODE_LIST. MODE_ALL / MODE_AUTO доступны для ручной настройки;
+  при их включении область обработки меняется. Специальные домены и явные
+  IP-профили в CUSTOM сохраняют свои независимые ограничения.
+- Game Filter остаётся выключенным. general.conf не добавлен: в примере были
+  только 21 альтернативная стратегия.
+- ipset.list сохранён: в нём адрес-заглушка 203.0.113.113/32.
+- BIN и пользовательские списки сохранены без изменения содержимого.
+  В NFQWS1 созданы каталоги blobs/ и lists/ в соответствии с путями конфигов.
+
+Проверены shell-синтаксис, сформированные аргументы, ссылки на файлы,
+сохранение параметров и приоритетов на тестовых сочетаниях фильтров.
+На роутерах и на реальном трафике работа не проверялась.
+
+Формат службы сверялся с:
+https://github.com/nfqws/nfqws-keenetic/blob/master/etc/init.d/common
