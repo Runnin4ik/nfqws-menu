@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.30"
+SCRIPT_VERSION="0.6.31"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -212,6 +212,74 @@ download_file() {
   fi
   rm -f "$dest"
   return 1
+}
+
+
+# ---------------------------------------------------------------------------
+# SHA256 для blobs (strategies/blobs/SHA256SUMS)
+# ---------------------------------------------------------------------------
+BLOBS_SHA256SUMS_URL="${RAW_BASE}/strategies/blobs/SHA256SUMS"
+BLOBS_SHA256SUMS_CACHE="/tmp/nfqws-blobs-SHA256SUMS"
+
+# 0 = есть sha256sum или openssl
+have_sha256() {
+  command -v sha256sum >/dev/null 2>&1 || command -v openssl >/dev/null 2>&1
+}
+
+# SHA256 файла → stdout (только хеш). При ошибке return 1.
+file_sha256() {
+  local f="$1"
+  [ -f "$f" ] || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$f" 2>/dev/null | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$f" 2>/dev/null | awk '{print $NF}'
+  else
+    return 1
+  fi
+}
+
+# Скачать/обновить кэш SHA256SUMS (TTL ~1ч). Не фатально при ошибке сети.
+ensure_blobs_sha256sums() {
+  local ttl=3600 now age
+  now=$(date +%s 2>/dev/null || echo 0)
+  if [ -f "$BLOBS_SHA256SUMS_CACHE" ] && [ -s "$BLOBS_SHA256SUMS_CACHE" ]; then
+    # mtime кэша
+    if age=$(stat -c %Y "$BLOBS_SHA256SUMS_CACHE" 2>/dev/null); then
+      if [ $((now - age)) -lt "$ttl" ]; then
+        return 0
+      fi
+    elif age=$(date -r "$BLOBS_SHA256SUMS_CACHE" +%s 2>/dev/null); then
+      if [ $((now - age)) -lt "$ttl" ]; then
+        return 0
+      fi
+    else
+      # нет stat — считаем кэш свежим, пока файл есть
+      return 0
+    fi
+  fi
+  if download_file "$BLOBS_SHA256SUMS_URL" "$BLOBS_SHA256SUMS_CACHE"; then
+    return 0
+  fi
+  # старый кэш лучше, чем ничего
+  [ -s "$BLOBS_SHA256SUMS_CACHE" ] && return 0
+  return 1
+}
+
+# Ожидаемый SHA256 для basename из кэша SUMS (пусто если нет)
+blob_expected_sha256() {
+  local name="$1"
+  [ -s "$BLOBS_SHA256SUMS_CACHE" ] || return 0
+  # формат: <hash>  <filename>  (два пробела) или hash + пробелы + name
+  awk -v n="$name" '
+    $2 == n { print $1; exit }
+    NF >= 2 {
+      # путь мог быть strategies/blobs/name
+      bn = $2
+      sub(/.*\//, "", bn)
+      if (bn == n) { print $1; exit }
+    }
+  ' "$BLOBS_SHA256SUMS_CACHE" 2>/dev/null
 }
 
 # curl|wget | sh для удалённых install.sh
@@ -747,7 +815,98 @@ check_conf_files() {
   done
 }
 
-check_blobs() { check_conf_files "blobs" "$2" extract_blob_paths "blobs" "Скачать отсутствующие blobs из strategies/blobs/?"; }
+# Проверка blobs: наличие + SHA256 (по strategies/blobs/SHA256SUMS).
+# Устаревшие/битые и отсутствующие предлагается скачать.
+# $1=ver (не используется, совместимость) $2=conf
+check_blobs() {
+  local conf="$2"
+  local paths path name missing=0 missing_list="" expected local_sha sums_ok=0
+
+  if [ ! -f "$conf" ]; then
+    warn "Конфиг $conf не найден — проверка blobs пропущена."
+    return 1
+  fi
+
+  paths=$(extract_blob_paths "$conf")
+  if [ -z "$paths" ]; then
+    info "В конфиге нет ссылок на blobs — проверка не требуется."
+    return 0
+  fi
+
+  if ensure_blobs_sha256sums; then
+    sums_ok=1
+    info "Эталон SHA256SUMS загружен (кэш: $BLOBS_SHA256SUMS_CACHE)."
+  else
+    warn "SHA256SUMS недоступен — проверка только по наличию файлов."
+  fi
+
+  info "blobs, указанные в конфиге:"
+  for path in $paths; do
+    name=$(basename "$path")
+    if [ ! -f "$path" ]; then
+      warn "  нет $path"
+      missing=1
+      missing_list="$missing_list $path"
+      continue
+    fi
+
+    if [ "$sums_ok" -eq 1 ] && have_sha256; then
+      expected=$(blob_expected_sha256 "$name")
+      if [ -n "$expected" ]; then
+        local_sha=$(file_sha256 "$path" || true)
+        if [ -n "$local_sha" ] && [ "$local_sha" = "$expected" ]; then
+          info "  OK  $path  (sha256)"
+        else
+          warn "  устарел/повреждён $path"
+          [ -n "$local_sha" ] && info "    local  $local_sha"
+          info "    expect $expected"
+          missing=1
+          missing_list="$missing_list $path"
+        fi
+      else
+        info "  OK  $path  (нет в SHA256SUMS)"
+      fi
+    else
+      info "  OK  $path"
+    fi
+  done
+
+  [ "$missing" -eq 0 ] && { info "Все используемые blobs на месте и актуальны."; return 0; }
+
+  warn "Часть blobs отсутствует или не совпадает с репозиторием."
+  confirm_yes "Скачать отсутствующие/устаревшие blobs из strategies/blobs/?" || return 0
+
+  for path in $missing_list; do
+    name=$(basename "$path")
+    mkdir -p "$(dirname "$path")"
+    info "Скачивание $name → $path"
+    if ! download_file "${RAW_BASE}/strategies/blobs/${name}" "$path"; then
+      rm -f "$path"
+      warn "  нет в репозитории / ошибка загрузки — файл не создан ($name)"
+      continue
+    fi
+    # пост-проверка SHA при наличии эталона
+    if [ "$sums_ok" -eq 1 ] && have_sha256; then
+      expected=$(blob_expected_sha256 "$name")
+      if [ -n "$expected" ]; then
+        local_sha=$(file_sha256 "$path" || true)
+        if [ -n "$local_sha" ] && [ "$local_sha" = "$expected" ]; then
+          info "  готово (sha256 OK)"
+        else
+          warn "  скачан, но sha256 не совпал — удаляю $path"
+          [ -n "$local_sha" ] && info "    local  $local_sha"
+          info "    expect $expected"
+          rm -f "$path"
+        fi
+      else
+        info "  готово (нет эталона в SHA256SUMS)"
+      fi
+    else
+      info "  готово"
+    fi
+  done
+}
+
 check_lists() { check_conf_files "lists" "$2" extract_list_paths "lists" "Скачать отсутствующие lists из strategies/lists/?"; }
 
 update_lists() {
