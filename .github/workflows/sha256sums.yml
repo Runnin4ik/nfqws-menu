@@ -1,0 +1,81 @@
+# Автогенерация SHA256SUMS для файлов репозитория.
+# - SHA256SUMS              — все отслеживаемые файлы (пути от корня)
+# - strategies/blobs/SHA256SUMS — только *.bin (имена файлов, удобно для nfqws-menu)
+#
+# Триггеры: push в main (любые файлы кроме самих SUMS), ручной запуск.
+# Коммит только если содержимое SUMS реально изменилось → без циклов.
+
+name: Update SHA256SUMS
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "SHA256SUMS"
+      - "strategies/blobs/SHA256SUMS"
+      - ".github/workflows/sha256sums.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sha256sums-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checksums:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Нужен полный history не обязателен; token для push от GITHUB_TOKEN
+          fetch-depth: 1
+
+      - name: Generate SHA256SUMS (repo root)
+        run: |
+          set -euo pipefail
+          # Все обычные файлы, кроме самих SUMS и служебного .git*
+          # Сортировка по пути — стабильный diff
+          find . -type f \
+            ! -path './.git/*' \
+            ! -name 'SHA256SUMS' \
+            ! -path './strategies/blobs/SHA256SUMS' \
+            -print0 \
+          | sort -z \
+          | xargs -0 sha256sum \
+          | sed 's|^\([0-9a-f]*\)  \./|\1  |' \
+          > SHA256SUMS
+          echo "Root SHA256SUMS entries: $(wc -l < SHA256SUMS)"
+
+      - name: Generate strategies/blobs/SHA256SUMS
+        run: |
+          set -euo pipefail
+          mkdir -p strategies/blobs
+          if ls strategies/blobs/*.bin >/dev/null 2>&1; then
+            (
+              cd strategies/blobs
+              sha256sum *.bin | sort -k2
+            ) > strategies/blobs/SHA256SUMS
+            echo "Blobs SHA256SUMS entries: $(wc -l < strategies/blobs/SHA256SUMS)"
+          else
+            echo "No .bin files — writing empty blobs SUMS"
+            : > strategies/blobs/SHA256SUMS
+          fi
+
+      - name: Commit and push if changed
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add SHA256SUMS strategies/blobs/SHA256SUMS
+
+          if git diff --cached --quiet; then
+            echo "SHA256SUMS unchanged — nothing to commit"
+            exit 0
+          fi
+
+          git commit -m "chore: update SHA256SUMS [skip ci]"
+          git push
