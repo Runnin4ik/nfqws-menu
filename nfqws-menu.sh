@@ -10,11 +10,20 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.33"
+SCRIPT_VERSION="0.6.35"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
 STRATEGIES_API="https://api.github.com/repos/rndnaame/nfqws-menu/contents/strategies"
+
+# Туннели для fallback-скачивания, если основной канал недоступен (DPI и т.п.)
+# Порядок = приоритет. opkgtun0 — usque; opgktun0 — на случай другого имени.
+FALLBACK_IFACES="awg0 t2s0 nwg0 opkgtun0 opgktun0"
+
+# Таймауты скачивания (сек): быстрее сдаёмся на основном канале → раньше fallback
+CURL_CONNECT_TIMEOUT=5
+CURL_MAX_TIME=15
+WGET_TIMEOUT=12
 
 # LD_LIBRARY_PATH не экспортируем глобально: /opt ломает ndmc (OpenSSL),
 # system-only ломает Entware wget/curl. Для ndmc — отдельная обёртка.
@@ -174,38 +183,89 @@ confirm_no() {
   return 1
 }
 
-# Скачать URL в stdout (curl → wget fallback; curl может быть сломан из‑за libnghttp2 и т.п.)
-fetch_url() {
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$1" 2>/dev/null && return 0
-  fi
-  if command -v wget >/dev/null 2>&1; then
-    wget -qO- "$1"
-  else
-    return 1
-  fi
+# Интерфейсы из FALLBACK_IFACES, которые есть в системе и не в состоянии down.
+# WireGuard/Amnezia часто дают operstate=unknown — их тоже берём.
+list_up_fallback_ifaces() {
+  local iface oper
+  for iface in $FALLBACK_IFACES; do
+    [ -d "/sys/class/net/$iface" ] || continue
+    oper=$(cat "/sys/class/net/$iface/operstate" 2>/dev/null || echo down)
+    case "$oper" in
+      down) continue ;;
+    esac
+    echo "$iface"
+  done
 }
 
-# Скачать URL в файл (curl → wget fallback).
+# Скачать URL в stdout (curl → wget; при неудаче — curl --interface через туннели).
+fetch_url() {
+  local url="$1" iface
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+      "$url" 2>/dev/null && return 0
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- -T "$WGET_TIMEOUT" "$url" 2>/dev/null && return 0
+  fi
+  # fallback через туннели (только curl --interface)
+  # сообщения в stderr, чтобы не портить stdout при пайпах (list_strategies и т.п.)
+  if command -v curl >/dev/null 2>&1; then
+    for iface in $(list_up_fallback_ifaces); do
+      warn "Основной канал недоступен, пробуем через $iface ..." >&2
+      if curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+           --interface "$iface" "$url" 2>/dev/null; then
+        info "Скачано через $iface" >&2
+        return 0
+      fi
+    done
+  fi
+  return 1
+}
+
+# Скачать URL в файл (curl → wget; при неудаче — curl --interface через туннели).
 # При ошибке/404/пустом ответе файл не оставляем.
 download_file() {
-  local url="$1" dest="$2" ok=0
+  local url="$1" dest="$2" ok=0 iface
   mkdir -p "$(dirname "$dest")" 2>/dev/null || true
   rm -f "$dest"
+
+  # 1) основной канал (короткие таймауты → быстрее переход на fallback).
+  # wget только если curl нет — иначе при блокировке ждём два таймаута подряд.
   if command -v curl >/dev/null 2>&1; then
-    if curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' "$url" -o "$dest" 2>/dev/null; then
+    if curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+         -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+         "$url" -o "$dest" 2>/dev/null; then
+      ok=1
+    else
+      rm -f "$dest"
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if wget -qO "$dest" -T "$WGET_TIMEOUT" --no-cache "$url" 2>/dev/null || \
+       wget -qO "$dest" -T "$WGET_TIMEOUT" "$url" 2>/dev/null; then
       ok=1
     else
       rm -f "$dest"
     fi
   fi
-  if [ "$ok" -eq 0 ] && command -v wget >/dev/null 2>&1; then
-    if wget -qO "$dest" --no-cache "$url" 2>/dev/null || wget -qO "$dest" "$url" 2>/dev/null; then
-      ok=1
-    else
+
+  # 2) fallback через туннели (только curl --interface)
+  if [ "$ok" -eq 0 ] && command -v curl >/dev/null 2>&1; then
+    for iface in $(list_up_fallback_ifaces); do
+      warn "Основной канал недоступен, пробуем через $iface ..."
       rm -f "$dest"
-    fi
+      if curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+           --interface "$iface" \
+           -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+           "$url" -o "$dest" 2>/dev/null; then
+        if [ -f "$dest" ] && [ -s "$dest" ]; then
+          ok=1
+          info "Скачано через $iface"
+          break
+        fi
+      fi
+      rm -f "$dest"
+    done
   fi
+
   # 404/пустой ответ: wget иногда пишет 0-байтный файл при ошибке
   if [ "$ok" -eq 1 ] && [ -f "$dest" ] && [ -s "$dest" ]; then
     return 0
@@ -712,11 +772,9 @@ list_strategies() {
   fi
 
   url="${STRATEGIES_API}/${ver}"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$url" 2>/dev/null | grep -o '"name": *"[^"]*\.conf"' | sed 's/.*"\([^"]*\)".*/\1/'
-  else
-    wget -qO- "$url" 2>/dev/null | grep -o '"name": *"[^"]*\.conf"' | sed 's/.*"\([^"]*\)".*/\1/'
-  fi
+  # через fetch_url — с fallback по туннелям при блокировке основного канала
+  # stderr не глушим: видны сообщения «пробуем через …»
+  fetch_url "$url" | grep -o '"name": *"[^"]*\.conf"' | sed 's/.*"\([^"]*\)".*/\1/'
 }
 
 
