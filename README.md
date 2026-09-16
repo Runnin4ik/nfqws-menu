@@ -4,9 +4,10 @@
 
 Репозиторий также служит хранилищем готовых **стратегий** обхода DPI, **blobs** и **lists**.
 
-- Скрипт: [`nfqws-menu.sh`](nfqws-menu.sh) (текущая версия **0.6.28**)
+- Скрипт: [`nfqws-menu.sh`](nfqws-menu.sh) (текущая версия **0.6.35**)
 - Стратегии: [`strategies/`](strategies/)
 - Hosts: [`hosts`](hosts)
+- Контрольные суммы: [`SHA256SUMS`](SHA256SUMS), [`strategies/blobs/SHA256SUMS`](strategies/blobs/SHA256SUMS)
 
 ### Официальные проекты
 
@@ -127,21 +128,30 @@ menu
 - Показывает список `.conf` из:
   - `strategies/nfqws1/` — для v1
   - `strategies/nfqws2/` — для v2
+- Список стратегий: сначала из корневого **`SHA256SUMS`** (без GitHub API), при недоступности — GitHub Contents API.
 - Скачивает выбранный файл, делает **бэкап** текущего конфига и применяет стратегию.
 - Перед записью **нормализует CRLF → LF** (Windows-переводы строк в `.conf` иначе ломают `source` и iptables: `: not found`, `invalid port/service`).
 - После применения выполняет пост-настройку:
 
-#### ISP_INTERFACE
+#### ISP_INTERFACE / IPV6_ENABLED
 
-Определяет интерфейс провайдера из default route (`ip route` / `route`), сравнивает с `ISP_INTERFACE` в конфиге и при необходимости предлагает установить правильное значение. При чтении значения из конфига снимаются `\r`, кавычки и пробелы (защита от CRLF в выводе меню).
+- Определяет интерфейс провайдера из default route (`ip route` / `route`), сравнивает с `ISP_INTERFACE` в конфиге и при необходимости предлагает установить правильное значение. При чтении значения снимаются `\r`, кавычки и пробелы (защита от CRLF в выводе меню).
+- Проверяет наличие **глобального IPv6** (`2a00*`) на интерфейсе провайдера и выставляет `IPV6_ENABLED=0|1` в конфиге.
 
-#### Проверка blobs
+#### Восстановление rkn.list
 
-Парсит установленный конфиг и находит используемые `.bin` (`--blob=…`, `--dpi-desync-fake-tls=…`, `--dpi-desync-fake-quic=…` и абсолютные пути). Отсутствующие предлагает скачать из `strategies/blobs/`.
+Если до смены стратегии в `MODE_LIST` уже был `--hostlist=…/rkn.list`, привязка **восстанавливается** после применения новой стратегии (полный `.conf` иначе затёр бы её).
+
+#### Проверка blobs (наличие + SHA256)
+
+Парсит установленный конфиг и находит используемые `.bin` (`--blob=…`, `--dpi-desync-fake-tls=…`, `--dpi-desync-fake-quic=…` и абсолютные пути).
+
+- Сверяет локальные файлы с эталоном [`strategies/blobs/SHA256SUMS`](strategies/blobs/SHA256SUMS) (`sha256sum` или `openssl dgst -sha256`; кэш SUMS ~1 ч).
+- Отсутствующие или **устаревшие/повреждённые** (хеш не совпал) предлагает скачать заново; после загрузки — повторная проверка SHA256 (при несовпадении файл удаляется).
 
 #### Обновление lists
 
-По запросу обновляет из `strategies/lists/`: `user.list`, `exclude.list`, `ipset.list`, `ipset_exclude.list`.\
+По запросу обновляет из `strategies/lists/`: `user.list`, `exclude.list`, `ipset.list`, `ipset_exclude.list`.  
 `auto.list` **не трогается** — его заполняет демон.
 
 После всех шагов соответствующий сервис перезапускается.
@@ -164,7 +174,7 @@ menu
 Доступно при установленном **nfqws-keenetic** (v1) и/или **nfqws2-keenetic** (v2). При обеих версиях — выбор: 1 / 2 / обе.
 
 - Если `rkn.list` уже есть — показывает размер в **КБ** (без медленного подсчёта 125k строк) и спрашивает, обновлять ли список (**по умолчанию: Нет**). При отказе скачивание пропускается.
-- Скачивает большой список доменов РКН из [IndeecFOX/zapret4rocket](https://github.com/IndeecFOX/zapret4rocket)  
+- Скачивает большой список доменов РКН из [IndeecFOX/zapret4rocket](https://github.com/IndeecFOX/zapret4rocket)\
   (`extra_strats/TCP/RKN/List.txt`).
 - Записывает:
   - **v1** → `/opt/etc/nfqws/rkn.list`
@@ -184,7 +194,7 @@ menu
 
 - Быстрый разбор конфига (v1/v2) одним проходом **awk**: секции `NFQWS_*ARGS*`, map `--blob=name:path`, уникальные `fake:blob=` (hex пропускаются).
 - Показывает список найденных имён по секциям.
-- Предлагает локальные `.bin` из каталога blobs и файлы из репозитория `strategies/blobs/` (кэш списка API \~1 ч).
+- Кандидаты `.bin`: локальные → имена из **`strategies/blobs/SHA256SUMS`** → GitHub API → встроенный fallback.
 - При выборе файла из репозитория — скачивает его, обновляет `--blob=…`, бэкап конфига.
 - Перезапуск сервиса — по подтверждению (по умолчанию Да).
 
@@ -192,11 +202,11 @@ menu
 
 Запись статических DNS-привязок на стороне **Keenetic** через `ndmc` (`ip host DOMAIN IP` / `no ip host DOMAIN` + сохранение конфигурации).
 
-- Скачивает файл [`hosts`](hosts) из репозитория.
+- Скачивает файл `hosts` из репозитория.
 - Секции задаются комментариями `# Имя секции`; внутри — строки `IP DOMAIN`.
 - Можно выбрать одну или несколько секций, **все**, либо **88** — удалить домены из hosts-файла.
 - Только **IPv4**; битые домены (`..`, ведущая `.`) пропускаются; **один IP на домен**.
-- Предупреждение, если уникальных записей **> 64** (лимит Keenetic `ip host`).
+- Предупреждение, если уникальных записей **&gt; 64** (лимит Keenetic `ip host`).
 - Нужен `ndmc` (только Keenetic / Netcraze OS).
 
 ### 9. Управление DoT/DoH
@@ -355,6 +365,16 @@ IFACE="opkgtun0"
 
 ## Changelog
 
+### 0.6.26 – 0.6.35
+
+- **SHA256 blobs** — проверка локальных `.bin` по `strategies/blobs/SHA256SUMS`; перекачка при несовпадении хеша
+- **Список стратегий** — из корневого `SHA256SUMS` (без GitHub API), API как fallback
+- **Список blobs** (п. 7) — приоритет SUMS → API → fallback
+- **Загрузки** — при блокировке основного канала `curl --interface` через туннели (`awg0`, `t2s0`, `nwg0`, `opkgtun0`, …); короткие таймауты
+- **CI** — workflow `.github/workflows/sha256sums.yml` обновляет `SHA256SUMS` и `strategies/blobs/SHA256SUMS` (push / daily / manual)
+- **п. 3** — авто `IPV6_ENABLED` по наличию глобального IPv6 на ISP-интерфейсе; сохранение привязки **rkn.list** в `MODE_LIST` при смене стратегии
+- **DNS (п. 9)** — парсер только секция System (`proxy-tls` / `proxy-https`); Policy* и `*-filters` игнорируются
+
 ### 0.6.23 – 0.6.25
 
 - **п. 5** — поддержка **v1 и v2** (выбор 1 / 2 / обе); размер существующего `rkn.list` в КБ вместо подсчёта строк
@@ -363,7 +383,7 @@ IFACE="opkgtun0"
 
 ### 0.6.22
 
-- **п. 8** — только IPv4; пропуск битых доменов (`..`, ведущая `.`); один IP на домен; предупреждение при >64 записей (лимит Keenetic)
+- **п. 8** — только IPv4; пропуск битых доменов (`..`, ведущая `.`); один IP на домен; предупреждение при &gt;64 записей (лимит Keenetic)
 - **hosts** — исправлены `objects.githubusercontent.com`, `my.telegram.org`; убраны IPv6 и дубли discord
 
 ### 0.6.19 – 0.6.21
@@ -392,6 +412,7 @@ IFACE="opkgtun0"
 - **п. 8** — **Обновление hosts** через `ndmc`
 - **п. 15** — **MagiTrickle** (установка/обновление/удаление)
 - **п. 9** (бывш. 6) — Управление DoT/DoH: пресеты Xbox-DNS DoT/DoH для Twitch (`gql.twitch.tv`, `usher.ttvnw.net`)
+- **SHA256** blobs + список стратегий из SUMS; fallback загрузок через VPN/туннель-интерфейсы
 - Нумерация: 5 = rkn.list, 6 = DoT/DoH bypass, 7 = fake:blob, 8 = hosts, 9 = Manage DoT/DoH
 - Статус: отображение magitrickle; удаление opera-proxy / KeenKit / MagiTrickle в п. 88
 - Без принудительного `export LD_LIBRARY_PATH` (совместимость ndmc / Entware wget)
@@ -433,9 +454,14 @@ IFACE="opkgtun0"
 nfqws-menu/
 ├── nfqws-menu.sh          # Главный скрипт меню
 ├── hosts                  # Секции IP DOMAIN для п. 8 (ndmc ip host)
+├── SHA256SUMS             # Хеши файлов репозитория (список стратегий без API)
 ├── README.md
+├── .github/workflows/
+│   └── sha256sums.yml     # Автообновление SHA256SUMS
 └── strategies/
-    ├── blobs/             # Бинарные шаблоны (*.bin)
+    ├── blobs/
+    │   ├── *.bin          # Бинарные шаблоны
+    │   └── SHA256SUMS     # Эталоны для проверки blobs на роутере
     ├── lists/             # Готовые списки доменов / IP
     │   ├── user.list
     │   ├── exclude.list
@@ -450,7 +476,7 @@ nfqws-menu/
 1. Файл `имя.conf` в `strategies/nfqws1/` или `strategies/nfqws2/`.
 2. Полный конфиг (`ISP_INTERFACE=`, `NFQWS_ARGS=` / `NFQWS_BASE_ARGS=` и т.д.).
 3. При необходимости — `.bin` в `strategies/blobs/`, списки в `strategies/lists/`.
-4. После push скрипт подхватит файл через GitHub API.
+4. После push workflow обновит `SHA256SUMS` / `strategies/blobs/SHA256SUMS`; скрипт подхватит стратегию из SUMS (или через GitHub API).
 
 ---
 
