@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.35"
+SCRIPT_VERSION="0.6.37"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -1766,7 +1766,7 @@ dot_servers_data() {
 20|OpenNameServer ns3|81.169.136.222|ns3.opennameserver.org|
 21|OpenNameServer ns4|185.181.61.24|ns4.opennameserver.org|
 22|IIJ Japan|public.dns.iij.jp|public.dns.iij.jp|
-23|Tiar Japan|jp.tiar.app|jp.tiar.app|
+23|Alibaba DNS|dns.alidns.com|dns.alidns.com|
 24|Xbox-DNS|xbox-dns.ru|xbox-dns.ru|
 25|Comss DNS|dns.comss.one|dns.comss.one|
 26|Malw Link|dns.malw.link|dns.malw.link|
@@ -1791,13 +1791,12 @@ doh_servers_data() {
 11|OpenNameServer ns3|https://ns3.opennameserver.org/dns-query
 12|OpenNameServer ns4|https://ns4.opennameserver.org/dns-query
 13|IIJ Japan|https://public.dns.iij.jp/dns-query
-14|Tiar Japan app|https://jp.tiar.app/dns-query
-15|Tiar Japan org|https://jp.tiarap.org/dns-query
-16|Xbox-DNS|https://xbox-dns.ru/dns-query
-17|Comss DNS|https://dns.comss.one/dns-query
-18|Malw Link|https://dns.malw.link/dns-query
-19|Cloudflare Gateway|https://5u35p8m9i7.cloudflare-gateway.com/dns-query
-20|Geo Hide|https://dns.geohide.ru/dns-query
+14|Alibaba DNS|https://dns.alidns.com/dns-query
+15|Xbox-DNS|https://xbox-dns.ru/dns-query
+16|Comss DNS|https://dns.comss.one/dns-query
+17|Malw Link|https://dns.malw.link/dns-query
+18|Cloudflare Gateway|https://5u35p8m9i7.cloudflare-gateway.com/dns-query
+19|Geo Hide|https://dns.geohide.ru/dns-query
 EOF
 }
 
@@ -1833,9 +1832,9 @@ add_dot_menu() {
   echo "19) OpenNameServer ns2 (213.202.211.221)"
   echo "20) OpenNameServer ns3 (81.169.136.222)"
   echo "21) OpenNameServer ns4 (185.181.61.24)"
-  printf '%s\n' " ${YELLOW}--- Япония ---${NC}"
+  printf '%s\n' " ${YELLOW}--- Япония & Китай ---${NC}"
   echo "22) IIJ Japan (public.dns.iij.jp)"
-  echo "23) Tiar Japan (jp.tiar.app)"
+  echo "23) Alibaba DNS (dns.alidns.com)"
   printf '%s\n' " ${GREEN}--- Proxy-DNS (Обход блокировок) ---${NC}"
   echo "24) Xbox-DNS (xbox-dns.ru)"
   echo "25) Comss DNS (dns.comss.one)"
@@ -1896,18 +1895,17 @@ add_doh_menu() {
   echo "10) OpenNameServer ns2 (https://ns2.opennameserver.org/dns-query)"
   echo "11) OpenNameServer ns3 (https://ns3.opennameserver.org/dns-query)"
   echo "12) OpenNameServer ns4 (https://ns4.opennameserver.org/dns-query)"
-  printf '%s\n' " ${YELLOW}--- Япония ---${NC}"
+  printf '%s\n' " ${YELLOW}--- Япония & Китай ---${NC}"
   echo "13) IIJ Japan (https://public.dns.iij.jp/dns-query)"
-  echo "14) Tiar Japan app (https://jp.tiar.app/dns-query)"
-  echo "15) Tiar Japan org (https://jp.tiarap.org/dns-query)"
+  echo "14) Alibaba DNS (https://dns.alidns.com/dns-query)"
   printf '%s\n' " ${GREEN}--- Proxy-DNS (Обход блокировок) ---${NC}"
-  echo "16) Xbox-DNS (https://xbox-dns.ru/dns-query)"
-  echo "17) Comss DNS Keenetic/MikroTik (https://dns.comss.one/dns-query)"
-  echo "18) Malw Link (https://dns.malw.link/dns-query)"
-  echo "19) Cloudflare Gateway (https://5u35p8m9i7.cloudflare-gateway.com/dns-query)"
-  echo "20) Geo Hide (https://dns.geohide.ru/dns-query)"
+  echo "15) Xbox-DNS (https://xbox-dns.ru/dns-query)"
+  echo "16) Comss DNS Keenetic/MikroTik (https://dns.comss.one/dns-query)"
+  echo "17) Malw Link (https://dns.malw.link/dns-query)"
+  echo "18) Cloudflare Gateway (https://5u35p8m9i7.cloudflare-gateway.com/dns-query)"
+  echo "19) Geo Hide (https://dns.geohide.ru/dns-query)"
   printf '%s\n' " ${YELLOW}--- Свой вариант ---${NC}"
-  echo "21) Ввести вручную (произвольный URI)"
+  echo "20) Ввести вручную (произвольный URI)"
   echo " 0) Отмена"
   printf '%s\n' "${DIM}────────────────────────────────────────────────────────${NC}"
   ask "Выберите варианты: "
@@ -1919,7 +1917,7 @@ add_doh_menu() {
 
   local added_any=0 choice line uri
   for choice in $(echo "$raw_choices" | tr ',' ' '); do
-    if [ "$choice" = "21" ]; then
+    if [ "$choice" = "20" ]; then
       ask "Введите URI DoH сервера: "; read -r manual_uri
       if [ -n "$manual_uri" ]; then
         apply_doh "$manual_uri" "$domain"
