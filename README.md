@@ -4,7 +4,7 @@
 
 Репозиторий также служит хранилищем готовых **стратегий** обхода DPI, **blobs** и **lists**.
 
-- Скрипт: [`nfqws-menu.sh`](nfqws-menu.sh) (текущая версия **0.6.39**)
+- Скрипт: [`nfqws-menu.sh`](nfqws-menu.sh) (текущая версия **0.6.40**)
 - Стратегии: [`strategies/`](strategies/)
 - Hosts: [`hosts`](hosts)
 - Контрольные суммы: [`SHA256SUMS`](SHA256SUMS), [`strategies/blobs/SHA256SUMS`](strategies/blobs/SHA256SUMS)
@@ -175,7 +175,7 @@ menu
 
 - Если `rkn.list` уже есть — показывает размер в **КБ** (без медленного подсчёта 125k строк) и спрашивает, обновлять ли список (**по умолчанию: Нет**). При отказе скачивание пропускается.
 - Скачивает большой список доменов РКН из [IndeecFOX/zapret4rocket](https://github.com/IndeecFOX/zapret4rocket)\
-  (`extra_strats/TCP/RKN/List.txt`).
+  (`extra_strats/TCP/RKN/List.txt`). При недоступности GitHub — зеркало `mizulina.shit.vc` (как в zapret4rocket/z4r).
 - Записывает:
   - **v1** → `/opt/etc/nfqws/rkn.list`
   - **v2** → `/opt/etc/nfqws2/lists/rkn.list`
@@ -364,6 +364,11 @@ IFACE="opkgtun0"
 ---
 
 ## Changelog
+
+### 0.6.40
+
+- **Таймауты загрузок** — увеличены для сильного DPI: connect 10 с, max 30 с, wget 25 с (раньше 5 / 15 / 12)
+- **п. 5 rkn.list** — при недоступности GitHub raw пробуется зеркало `http://mizulina.shit.vc:666/...` (как в zapret4rocket); URL основного источника упрощён (`…/master/…` без `refs/heads`)
 
 ### 0.6.36 – 0.6.39
 
