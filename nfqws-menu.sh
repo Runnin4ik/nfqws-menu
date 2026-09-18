@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.39"
+SCRIPT_VERSION="0.6.40"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -20,10 +20,11 @@ STRATEGIES_API="https://api.github.com/repos/rndnaame/nfqws-menu/contents/strate
 # Порядок = приоритет. opkgtun0 — usque; opgktun0 — на случай другого имени.
 FALLBACK_IFACES="awg0 t2s0 nwg0 opkgtun0 opgktun0"
 
-# Таймауты скачивания (сек): быстрее сдаёмся на основном канале → раньше fallback
-CURL_CONNECT_TIMEOUT=5
-CURL_MAX_TIME=15
-WGET_TIMEOUT=12
+# Таймауты скачивания (сек). Чуть выше для сильного DPI, но не слишком —
+# чтобы быстрее уходить на fallback/зеркало.
+CURL_CONNECT_TIMEOUT=10
+CURL_MAX_TIME=30
+WGET_TIMEOUT=25
 
 # LD_LIBRARY_PATH не экспортируем глобально: /opt ломает ndmc (OpenSSL),
 # system-only ломает Entware wget/curl. Для ndmc — отдельная обёртка.
@@ -1252,7 +1253,9 @@ update_ipset_list() {
 # ---------------------------------------------------------------------------
 # 5. rkn.list (zapret4rocket) → lists + MODE_LIST (nfqws v1 / nfqws2)
 # ---------------------------------------------------------------------------
-RKN_LIST_URL="https://raw.githubusercontent.com/IndeecFOX/zapret4rocket/refs/heads/master/extra_strats/TCP/RKN/List.txt"
+RKN_LIST_URL="https://raw.githubusercontent.com/IndeecFOX/zapret4rocket/master/extra_strats/TCP/RKN/List.txt"
+# Зеркало (как в zapret4rocket/z4r) — если GitHub raw режется DPI
+RKN_LIST_MIRROR_URL="http://mizulina.shit.vc:666/IndeecFOX/zapret4rocket/master/extra_strats/TCP/RKN/List.txt"
 
 # Аргумент --hostlist=.../rkn.list для указанной версии nfqws
 rkn_hostlist_arg() {
@@ -1387,9 +1390,14 @@ update_rkn_list() {
     info "Скачивание rkn.list (zapret4rocket) ..."
     info "URL: $RKN_LIST_URL"
     if ! download_file "$RKN_LIST_URL" "$tmp"; then
-      error "Не удалось скачать список."
-      rm -f "$tmp"
-      return 1
+      warn "Основной URL недоступен, пробуем зеркало ..."
+      info "URL: $RKN_LIST_MIRROR_URL"
+      if ! download_file "$RKN_LIST_MIRROR_URL" "$tmp"; then
+        error "Не удалось скачать список (ни GitHub, ни зеркало)."
+        rm -f "$tmp"
+        return 1
+      fi
+      info "Скачано с зеркала."
     fi
 
     grep -vE '^[[:space:]]*(#|;|$)' "$tmp" | sed 's/[[:space:]]*$//' | grep -vE '^$' > "$cleaned" || true
