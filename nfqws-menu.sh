@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.45"
+SCRIPT_VERSION="0.6.46"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -1038,8 +1038,37 @@ update_lists() {
   info "Списки обновлены (auto.list не изменялся)."
 }
 
+# Восстановить строку VAR=… в конфиге (полная строка как была, без CRLF).
+# $1=conf  $2=имя переменной (POLICY_NAME)  $3=сохранённая строка целиком (POLICY_NAME="nfqws")
+restore_conf_var_line() {
+  local conf="$1" var="$2" line="$3"
+  [ -n "$line" ] || return 0
+  line=$(printf '%s' "$line" | tr -d '\r')
+  if grep -qE "^${var}=" "$conf" 2>/dev/null; then
+    sed -i "s|^${var}=.*|${line}|" "$conf"
+  elif grep -qE '^(POLICY_|ISP_INTERFACE=)' "$conf" 2>/dev/null; then
+    # вставить после последней строки POLICY_* / ISP_INTERFACE
+    awk -v line="$line" '
+      { buf[NR] = $0; if ($0 ~ /^(POLICY_|ISP_INTERFACE=)/) last = NR }
+      END {
+        n = NR
+        for (i = 1; i <= n; i++) {
+          print buf[i]
+          if (i == last) print line
+        }
+        if (!last) print line
+      }
+    ' "$conf" > "${conf}.new" && mv "${conf}.new" "$conf"
+  else
+    printf '%s\n' "$line" >> "$conf"
+  fi
+}
+
 apply_strategy() {
   local ver="$1" conf_name="$2" conf_path conf_dest tmp had_rkn=0 rkn_path
+  local saved_policy_name="" saved_policy_exclude="" had_policy=0
+  local pn_val pe_val policy_nondefault=0
+
   conf_dest=$(nfqws_conf_path "$ver")
 
   if [ "$conf_name" = "default" ]; then
@@ -1061,6 +1090,17 @@ apply_strategy() {
   if conf_has_rkn_hostlist "$conf_dest" "$ver"; then
     had_rkn=1
     info "В текущем конфиге есть привязка rkn.list — будет восстановлена после смены стратегии."
+  fi
+
+  # Сохранить POLICY_NAME / POLICY_EXCLUDE (стратегия обычно их затирает).
+  # Стандарт: POLICY_NAME="nfqws" POLICY_EXCLUDE=0 — без лишних сообщений в лог.
+  if grep -qE '^POLICY_NAME=' "$conf_dest" 2>/dev/null; then
+    saved_policy_name=$(grep -E '^POLICY_NAME=' "$conf_dest" 2>/dev/null | head -1 | tr -d '\r')
+    had_policy=1
+  fi
+  if grep -qE '^POLICY_EXCLUDE=' "$conf_dest" 2>/dev/null; then
+    saved_policy_exclude=$(grep -E '^POLICY_EXCLUDE=' "$conf_dest" 2>/dev/null | head -1 | tr -d '\r')
+    had_policy=1
   fi
 
   info "Скачивание стратегии: $conf_name"
@@ -1090,6 +1130,29 @@ apply_strategy() {
     return 1
   fi
   rm -f "$tmp"
+
+  # POLICY_*: стандарт (nfqws / 0) не трогаем; нестандартные — только по y/N
+  if [ "$had_policy" -eq 1 ]; then
+    pn_val=$(printf '%s' "${saved_policy_name#POLICY_NAME=}" | tr -d '\r"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    pe_val=$(printf '%s' "${saved_policy_exclude#POLICY_EXCLUDE=}" | tr -d '\r"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    policy_nondefault=0
+    [ -n "$saved_policy_name" ] && [ "$pn_val" != "nfqws" ] && policy_nondefault=1
+    [ -n "$saved_policy_exclude" ] && [ "$pe_val" != "0" ] && policy_nondefault=1
+
+    if [ "$policy_nondefault" -eq 1 ]; then
+      echo
+      info "Сохранённые POLICY_* отличаются от стандартных (nfqws / 0):"
+      [ -n "$saved_policy_name" ] && info "  $saved_policy_name"
+      [ -n "$saved_policy_exclude" ] && info "  $saved_policy_exclude"
+      if confirm_no "Восстановить эти POLICY_NAME / POLICY_EXCLUDE?"; then
+        [ -n "$saved_policy_name" ] && restore_conf_var_line "$conf_dest" "POLICY_NAME" "$saved_policy_name"
+        [ -n "$saved_policy_exclude" ] && restore_conf_var_line "$conf_dest" "POLICY_EXCLUDE" "$saved_policy_exclude"
+        info "POLICY_* восстановлены."
+      else
+        info "Восстановление POLICY_* пропущено."
+      fi
+    fi
+  fi
 
   echo
   info "=== Проверка ISP_INTERFACE / IPV6_ENABLED ==="
