@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.40"
+SCRIPT_VERSION="0.6.43"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -249,9 +249,10 @@ download_file() {
   fi
 
   # 2) fallback через туннели (только curl --interface)
+  # сообщения в stderr — иначе попадают в stdout при list=$(list_strategies …) и т.п.
   if [ "$ok" -eq 0 ] && command -v curl >/dev/null 2>&1; then
     for iface in $(list_up_fallback_ifaces); do
-      warn "Основной канал недоступен, пробуем через $iface ..."
+      warn "Основной канал недоступен, пробуем через $iface ..." >&2
       rm -f "$dest"
       if curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
            --interface "$iface" \
@@ -259,7 +260,7 @@ download_file() {
            "$url" -o "$dest" 2>/dev/null; then
         if [ -f "$dest" ] && [ -s "$dest" ]; then
           ok=1
-          info "Скачано через $iface"
+          info "Скачано через $iface" >&2
           break
         fi
       fi
@@ -768,7 +769,8 @@ list_strategies() {
     list=$(list_strategies_from_sums "$ver" || true)
   fi
   if [ -n "$list" ]; then
-    printf '%s\n' "$list"
+    # только имена *.conf (защита от мусора в stdout при fallback-сообщениях)
+    printf '%s\n' "$list" | grep -E '\.conf$' || true
     return 0
   fi
 
@@ -1132,6 +1134,86 @@ detect_current_strategy() {
     sed -n 's/.*(\([^)]*\)).*/\1/p' | head -1 | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]'
 }
 
+# Восстановление конфига из .bak.* (nfqws.conf.bak.YYYYMMDDHHMMSS / nfqws2.conf.bak.…)
+restore_conf_from_backup() {
+  local ver="$1"
+  local conf_dest conf_dir conf_base bak_list i f num selected count=0
+
+  conf_dest=$(nfqws_conf_path "$ver")
+  conf_dir=$(dirname "$conf_dest")
+  conf_base=$(basename "$conf_dest")
+
+  echo
+  info "Резервные копии конфига ($conf_base) — NFQWS V${ver}:"
+  # от свежего к старому (timestamp в имени: .bak.YYYYMMDDHHMMSS)
+  bak_list=$(
+    for f in "$conf_dir"/"$conf_base".bak.*; do
+      [ -f "$f" ] || continue
+      echo "$f"
+    done | sort -r
+  )
+  count=0
+  for f in $bak_list; do
+    count=$((count + 1))
+    # стратегия из комментария вида: #  general (ALT11).bat  ->  nfqws2
+    strat=$(grep -iE 'general[[:space:]]*\(' "$f" 2>/dev/null | \
+      sed -n 's/.*(\([^)]*\)).*/\1/p' | head -1 | tr -d '[:space:]')
+    if [ -n "$strat" ]; then
+      tag=" ($strat)"
+    else
+      tag=""
+    fi
+    if [ "$count" -eq 1 ]; then
+      printf "  %s%2d) %s%s%s\n" "$YELLOW$BOLD" "$count" "$(basename "$f")" "$tag" "$NC"
+    else
+      printf "  %2d) %s%s\n" "$count" "$(basename "$f")" "$tag"
+    fi
+  done
+
+  if [ "$count" -eq 0 ]; then
+    warn "Резервные копии не найдены в $conf_dir"
+    return 0
+  fi
+
+  echo "   0) Назад"
+  ask "Номер файла для восстановления: "
+  read -r num
+  [ -z "$num" ] || [ "$num" = "0" ] && return 0
+
+  i=1
+  selected=""
+  for f in $bak_list; do
+    if [ "$i" = "$num" ]; then
+      selected="$f"
+      break
+    fi
+    i=$((i + 1))
+  done
+  [ -z "$selected" ] && { warn "Неверный номер"; return 1; }
+
+  echo
+  info "Восстановление из: $(basename "$selected")"
+  info "В текущий конфиг:  $conf_dest"
+  if ! confirm_yes "Восстановить этот бэкап?"; then
+    info "Отменено."
+    return 0
+  fi
+
+  if ! cp -a "$selected" "$conf_dest"; then
+    error "Не удалось скопировать $selected → $conf_dest"
+    return 1
+  fi
+  info "Конфиг восстановлен из $(basename "$selected")"
+
+  echo
+  info "=== Проверка ISP_INTERFACE / IPV6_ENABLED ==="
+  fix_isp_interface "$conf_dest"
+
+  echo
+  service_restart "$(nfqws_init_path "$ver")"
+  info "Сервис перезапущен."
+}
+
 menu_strategy() {
   need_nfqws_installed || return
   pick_nfqws_ver 0 || return
@@ -1170,10 +1252,16 @@ menu_strategy() {
     files="$files $f"
     i=$((i + 1))
   done
+  echo "  99) восстановление из backup"
   echo "   0) Назад"
   ask "Номер стратегии: "
   read -r num
   [ -z "$num" ] || [ "$num" = "0" ] && return
+
+  if [ "$num" = "99" ]; then
+    restore_conf_from_backup "$NFQWS_VER"
+    return
+  fi
 
   idx=1
   selected=""
