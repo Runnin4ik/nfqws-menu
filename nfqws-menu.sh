@@ -2338,8 +2338,8 @@ menu_update_hosts() {
     i=$((i + 1))
   done < "$sec_file"
   local all_num=$i
-  printf ' %s) все\n' "$all_num"
-  printf ' %s88) удалить записи из hosts%s\n' "$RED" "$NC"
+  printf ' %s) Все\n' "$all_num"
+  printf ' %s88) Удалить записи из hosts%s\n' "$RED" "$NC"
   printf ' %s99) Просмотреть записи в host%s\n' "$YELLOW" "$NC"
   printf ' 0) Отмена\n'
   printf '%s\n' "${DIM}────────────────────────────────────────────────────────${NC}"
