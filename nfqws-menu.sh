@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.49"
+SCRIPT_VERSION="0.6.51"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -625,12 +625,22 @@ proc_running() {
   printf '%s\n' "$PROC_CACHE" | grep -qF -- "$name"
 }
 
-# kind: nfqws|nfqws2|web|usque|tg-ws-proxy → 1 если «запущен»
+# kind → «запущен?» (по процессу / порту)
 service_is_up() {
   case "$1" in
-    nfqws|nfqws2|usque|tg-ws-proxy|magitrickle) proc_running "$1" ;;
+    nfqws|nfqws2|usque|tg-ws-proxy|magitrickle|awg-manager) proc_running "$1" ;;
     web)
       port_is_open 90 || proc_running lighttpd
+      ;;
+    # awg-manager: сам демон, либо sing-box из его каталога, либо amneziawg
+    awg)
+      proc_running "awg-manager" && return 0
+      proc_running "amneziawg" && return 0
+      # sing-box часто общий; учитываем только если он из комплекта awg-manager
+      if [ -x /opt/etc/awg-manager/singbox/sing-box ] || [ -f /opt/etc/awg-manager/singbox/sing-box ]; then
+        proc_running "sing-box" && return 0
+      fi
+      return 1
       ;;
     *) return 1 ;;
   esac
@@ -646,8 +656,11 @@ print_pkg_info() {
   return 0
 }
 
+# $1=имя $2=версия/инфо [$3=kind для ⚡, опционально]
 print_tool_info() {
-  printf '  %s%-22s%s %s\n' "$GREEN" "$1" "$NC" "$2"
+  local name="$1" info="$2" kind="${3:-}" mark=""
+  [ -n "$kind" ] && service_is_up "$kind" && mark="$RUN_MARK"
+  printf '  %s%-22s%s %s%s\n' "$GREEN" "$name" "$NC" "$info" "$mark"
 }
 
 show_installed() {
@@ -687,7 +700,7 @@ show_installed() {
       awg_info=$(pkg_version awg-manager)
       [ -z "$awg_info" ] && awg_info="ok"
     fi
-    print_tool_info "$awg_name" "$awg_info"
+    print_tool_info "$awg_name" "$awg_info" "awg"
     shown=1
   fi
 
@@ -2929,11 +2942,7 @@ cleanup_dpi_detector_dupes() {
     [ -n "$primary" ] && [ "$f" = "$primary" ] && continue
     [ -n "$primary" ] && [ -f "$primary" ] && rm -f "$f" && info "  удалён дубликат: $f"
   done
-  if [ -x /opt/bin/dpi-detector ]; then
-    info "Основной бинарник: /opt/bin/dpi-detector"
-  elif [ -n "$primary" ]; then
-    info "Основной бинарник: $primary"
-  fi
+  # путь основного бинарника не печатаем здесь — его уже показывает menu_dpi_detector
 }
 
 menu_dpi_detector() {
