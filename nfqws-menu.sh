@@ -1177,7 +1177,8 @@ apply_strategy() {
   if [ "$had_rkn" -eq 1 ]; then
     echo
     info "=== Восстановление rkn.list в MODE_LIST ==="
-    if inject_rkn_into_mode_list "$ver" "$conf_dest"; then
+    # skip_backup=1 — бэкап уже сделан перед заменой конфига стратегией
+    if inject_rkn_into_mode_list "$ver" "$conf_dest" 1; then
       rkn_path=$(rkn_list_path "$ver" 2>/dev/null || true)
       if [ -n "$rkn_path" ] && [ ! -f "$rkn_path" ]; then
         warn "Файл $rkn_path отсутствует — скачайте через пункт меню «rkn.list»."
@@ -1437,8 +1438,9 @@ conf_has_rkn_hostlist() {
 # Вставить --hostlist=.../rkn.list в MODE_LIST конфига (идемпотентно).
 # Возвращает 0 если уже было / успешно добавлено, 1 при ошибке.
 # $1=ver  $2=conf (опционально; по умолчанию nfqws_conf_path)
+# $3=1 — не делать backup (уже сделан, напр. в apply_strategy)
 inject_rkn_into_mode_list() {
-  local ver="$1" conf="${2:-}" hostlist_arg user_list tmp_conf
+  local ver="$1" conf="${2:-}" skip_backup="${3:-0}" hostlist_arg user_list tmp_conf
   hostlist_arg=$(rkn_hostlist_arg "$ver") || return 1
   [ -z "$conf" ] && conf=$(nfqws_conf_path "$ver")
   [ -f "$conf" ] || { warn "Конфиг не найден: $conf — MODE_LIST не обновлён."; return 1; }
@@ -1455,7 +1457,7 @@ inject_rkn_into_mode_list() {
   fi
 
   if grep -qE '^[[:space:]]*MODE_LIST=' "$conf" 2>/dev/null; then
-    backup_file "$conf"
+    [ "$skip_backup" = "1" ] || backup_file "$conf"
     # Вставляем --hostlist=...rkn.list перед закрывающей кавычкой.
     # awk надёжнее busybox sed (пробелы, пустые кавычки, CRLF, single quotes).
     tmp_conf="/tmp/nfqws-mode-$$.conf"
@@ -1497,7 +1499,7 @@ inject_rkn_into_mode_list() {
   fi
 
   # MODE_LIST отсутствует — создаём с user.list + rkn
-  backup_file "$conf"
+  [ "$skip_backup" = "1" ] || backup_file "$conf"
   printf '\nMODE_LIST="--hostlist=%s %s"\n' "$user_list" "$hostlist_arg" >> "$conf"
   info "MODE_LIST создан с user.list и rkn.list"
   return 0
