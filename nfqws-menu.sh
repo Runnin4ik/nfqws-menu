@@ -1223,6 +1223,7 @@ apply_strategy() {
   local ver="$1" conf_name="$2" conf_path conf_dest tmp had_rkn=0 rkn_path
   local saved_policy_name="" saved_policy_exclude="" had_policy=0
   local pn_val pe_val policy_nondefault=0
+  local init_script stopped_svc=0 cache_file
 
   conf_dest=$(nfqws_conf_path "$ver")
 
@@ -1261,6 +1262,8 @@ apply_strategy() {
   info "Скачивание стратегии: $conf_name"
   info "URL: $conf_path"
   tmp="/tmp/nfqws-strategy-$$.conf"
+  init_script=$(nfqws_init_path "$ver")
+
   if ! download_file "$conf_path" "$tmp"; then
     # default: запасной branch main
     if [ "$conf_name" = "default" ] && echo "$conf_path" | grep -q '/master/'; then
@@ -1269,15 +1272,25 @@ apply_strategy() {
       download_file "$conf_path" "$tmp" || true
     fi
   fi
+
+  # Сеть/DPI мешают — остановить nfqws и повторить (сервис может ломать загрузку)
+  if [ ! -s "$tmp" ] && [ -x "$init_script" ]; then
+    warn "Скачивание не удалось — останавливаем $(basename "$init_script") и пробуем снова..."
+    "$init_script" stop 2>/dev/null || true
+    stopped_svc=1
+    sleep 1
+    download_file "$conf_path" "$tmp" || true
+  fi
+
   if [ ! -s "$tmp" ]; then
     # offline: локальный кэш
-    local cache_file
     cache_file=$(cache_strategy_path "$ver" "$conf_name")
     if [ -f "$cache_file" ] && [ -s "$cache_file" ]; then
       warn "Сеть недоступна — берём из кэша: $cache_file"
       cp "$cache_file" "$tmp"
     else
       error "Не удалось скачать $conf_path (и нет кэша offline)"
+      [ "$stopped_svc" -eq 1 ] && service_restart "$init_script"
       return 1
     fi
   else
@@ -1364,11 +1377,18 @@ apply_strategy() {
   info "Сервис перезапущен."
 }
 
+# Метка стратегии из комментария: # general (SIMPLE FAKE ALT).bat -> nfqws2
+# Возвращает текст в скобках как есть (для отображения).
 detect_current_strategy() {
   local conf="$1"
   [ -f "$conf" ] || return 0
   grep -iE 'general[[:space:]]*\(' "$conf" 2>/dev/null | \
-    sed -n 's/.*(\([^)]*\)).*/\1/p' | head -1 | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]'
+    sed -n 's/.*(\([^)]*\)).*/\1/p' | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+# Нормализация для сравнения: "SIMPLE FAKE ALT" / simple_fake_alt → simplefakealt
+strategy_id_norm() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]_-'
 }
 
 # Восстановление конфига из .bak.* (nfqws.conf.bak.YYYYMMDDHHMMSS / nfqws2.conf.bak.…)
@@ -1456,6 +1476,7 @@ menu_strategy() {
   pick_nfqws_ver 0 || return
 
   local conf_dest current_id dir list i files f base num idx selected
+  local cache_file has_cache
   conf_dest=$(nfqws_conf_path "$NFQWS_VER")
   current_id=$(detect_current_strategy "$conf_dest")
   [ -n "$current_id" ] && info "Текущая стратегия в конфиге: $current_id"
@@ -1471,8 +1492,13 @@ menu_strategy() {
 
   i=1
   files="default"
+  cache_file=$(cache_strategy_path "$NFQWS_VER" "default")
+  has_cache=0
+  [ -f "$cache_file" ] && [ -s "$cache_file" ] && has_cache=1
   if [ -z "$current_id" ]; then
     printf "  %s%2d) default  (стандартная из репозитория nfqws)  <-- текущая?%s\n" "$GREEN$BOLD" "$i" "$NC"
+  elif [ "$has_cache" -eq 1 ]; then
+    printf "  %s%2d) default  (стандартная из репозитория nfqws)%s\n" "$CYAN" "$i" "$NC"
   else
     printf "  %2d) default  (стандартная из репозитория nfqws)\n" "$i"
   fi
@@ -1481,8 +1507,14 @@ menu_strategy() {
   # shellcheck disable=SC2086
   for f in $list; do
     base=$(echo "$f" | sed 's/\.conf$//' | tr '[:upper:]' '[:lower:]')
-    if [ -n "$current_id" ] && [ "$base" = "$current_id" ]; then
+    cache_file=$(cache_strategy_path "$NFQWS_VER" "$f")
+    has_cache=0
+    [ -f "$cache_file" ] && [ -s "$cache_file" ] && has_cache=1
+    # SIMPLE FAKE ALT ↔ simple_fake_alt (пробелы/подчёркивания не учитываем)
+    if [ -n "$current_id" ] && [ "$(strategy_id_norm "$base")" = "$(strategy_id_norm "$current_id")" ]; then
       printf "  %s%2d) %s  <-- текущая%s\n" "$GREEN$BOLD" "$i" "$f" "$NC"
+    elif [ "$has_cache" -eq 1 ]; then
+      printf "  %s%2d) %s%s\n" "$CYAN" "$i" "$f" "$NC"
     else
       printf "  %2d) %s\n" "$i" "$f"
     fi
