@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.44"
+SCRIPT_VERSION="0.6.45"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -2069,13 +2069,15 @@ add_domain_menu() {
   printf '%s\n' "${BOLD}Быстрая привязка DNS к целевым доменам (можно несколько через запятую, напр. 1,3,5):${NC}"
   echo " 1) CleanBrowsing DoT (185.228.168.9 + SNI) ➔ instagram.com"
   echo " 2) CleanBrowsing DoH (doh.cleanbrowsing.org) ➔ instagram.com"
-  echo " 3) sw.ext.io DoT ➔ rutor.is & rutor.info"
-  echo " 4) Malw Link DoH (dns.malw.link) ➔ ntc.party"
-  echo " 5) Xbox-DNS DoT ➔ gql.twitch.tv & usher.ttvnw.net"
-  echo " 6) Xbox-DNS DoH ➔ gql.twitch.tv & usher.ttvnw.net"
-  echo " 7) NullsProxy DoT ➔ Supercell (Brawl/CoC/CR)"
-  echo " 8) NullsProxy DoH ➔ Supercell (Brawl/CoC/CR)"
-  echo " 9) Ввести свой домен и выбрать сервер"
+  echo " 3) CleanBrowsing DoT (185.228.168.9 + SNI) ➔ cdninstagram.com"
+  echo " 4) CleanBrowsing DoH (doh.cleanbrowsing.org) ➔ cdninstagram.com"
+  echo " 5) sw.ext.io DoT ➔ rutor.is & rutor.info"
+  echo " 6) Malw Link DoH (dns.malw.link) ➔ ntc.party"
+  echo " 7) Xbox-DNS DoT ➔ gql.twitch.tv & usher.ttvnw.net"
+  echo " 8) Xbox-DNS DoH ➔ gql.twitch.tv & usher.ttvnw.net"
+  echo " 9) NullsProxy DoT ➔ Supercell (Brawl/CoC/CR)"
+  echo "10) NullsProxy DoH ➔ Supercell (Brawl/CoC/CR)"
+  echo "11) Ввести свой домен и выбрать сервер"
   echo " 0) Отмена"
   printf '%s\n' "${DIM}────────────────────────────────────────────────────────${NC}"
   ask "Выберите варианты: "
@@ -2087,23 +2089,25 @@ add_domain_menu() {
     case $choice in
       1) apply_dot "185.228.168.9" "security-filter-dns.cleanbrowsing.org" "instagram.com" "853"; added_any=1 ;;
       2) apply_doh "https://doh.cleanbrowsing.org/doh/security-filter/" "instagram.com"; added_any=1 ;;
-      3)
+      3) apply_dot "185.228.168.9" "security-filter-dns.cleanbrowsing.org" "cdninstagram.com" "853"; added_any=1 ;;
+      4) apply_doh "https://doh.cleanbrowsing.org/doh/security-filter/" "cdninstagram.com"; added_any=1 ;;
+      5)
         apply_dot "sw.ext.io" "" "rutor.is"
         apply_dot "sw.ext.io" "" "rutor.info"
         added_any=1
         ;;
-      4) apply_doh "https://dns.malw.link/dns-query" "ntc.party"; added_any=1 ;;
-      5)
+      6) apply_doh "https://dns.malw.link/dns-query" "ntc.party"; added_any=1 ;;
+      7)
         apply_dot "xbox-dns.ru" "xbox-dns.ru" "gql.twitch.tv"
         apply_dot "xbox-dns.ru" "xbox-dns.ru" "usher.ttvnw.net"
         added_any=1
         ;;
-      6)
+      8)
         apply_doh "https://xbox-dns.ru/dns-query" "gql.twitch.tv"
         apply_doh "https://xbox-dns.ru/dns-query" "usher.ttvnw.net"
         added_any=1
         ;;
-      7)
+      9)
         # Supercell via NullsProxy DoT
         apply_dot "dns.nullsproxy.com" "dns.nullsproxy.com" "supercell.com"
         apply_dot "dns.nullsproxy.com" "dns.nullsproxy.com" "supercellid.com"
@@ -2112,7 +2116,7 @@ add_domain_menu() {
         apply_dot "dns.nullsproxy.com" "dns.nullsproxy.com" "clashroyaleapp.com"
         added_any=1
         ;;
-      8)
+      10)
         # Supercell via NullsProxy DoH
         apply_doh "https://dns.nullsproxy.com/dns-query" "supercell.com"
         apply_doh "https://dns.nullsproxy.com/dns-query" "supercellid.com"
@@ -2121,7 +2125,7 @@ add_domain_menu() {
         apply_doh "https://dns.nullsproxy.com/dns-query" "clashroyaleapp.com"
         added_any=1
         ;;
-      9)
+      11)
         ask "Введите домен (например: example.com): "; read -r dom
         [ -z "$dom" ] && continue
         echo "Тип протокола: 1) DoT  2) DoH"
