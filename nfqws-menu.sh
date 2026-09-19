@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.47"
+SCRIPT_VERSION="0.6.49"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -24,6 +24,7 @@ FALLBACK_IFACES="awg0 t2s0 nwg0 opkgtun0 opgktun0"
 # чтобы быстрее уходить на fallback/зеркало.
 CURL_CONNECT_TIMEOUT=10
 CURL_MAX_TIME=30
+CURL_MAX_TIME_LARGE=180   # rkn.list ~2 МБ и подобные
 WGET_TIMEOUT=25
 
 # LD_LIBRARY_PATH не экспортируем глобально: /opt ломает ndmc (OpenSSL),
@@ -54,10 +55,16 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Язык UI  (/opt/etc/nfqws-menu.lang, env NFQWS_MENU_LANG / NFQWS_MENU_UTF8)
+# Язык UI  (/opt/etc/nfqws-menu/nfqws-menu.lang, env NFQWS_MENU_LANG / NFQWS_MENU_UTF8)
+# Миграция со старого пути /opt/etc/nfqws-menu.lang
 # Авто: SSH → ru, иначе en
 # ---------------------------------------------------------------------------
-UI_LANG_FILE="/opt/etc/nfqws-menu.lang"
+UI_LANG_FILE="/opt/etc/nfqws-menu/nfqws-menu.lang"
+if [ ! -f "$UI_LANG_FILE" ] && [ -f /opt/etc/nfqws-menu.lang ]; then
+  mkdir -p /opt/etc/nfqws-menu 2>/dev/null || true
+  mv /opt/etc/nfqws-menu.lang "$UI_LANG_FILE" 2>/dev/null || \
+    cp /opt/etc/nfqws-menu.lang "$UI_LANG_FILE" 2>/dev/null || true
+fi
 
 ui_detect_default_lang() {
   case "${NFQWS_MENU_LANG:-}" in
@@ -156,7 +163,7 @@ menu_change_language() {
   else
     ui_apply_lang "ru"
   fi
-  mkdir -p /opt/etc 2>/dev/null || true
+  mkdir -p /opt/etc/nfqws-menu 2>/dev/null || true
   echo "$UI_LANG" > "$UI_LANG_FILE" 2>/dev/null || true
 }
 
@@ -199,7 +206,7 @@ list_up_fallback_ifaces() {
 }
 
 # Локальный кэш загрузок (offline / при блокировке GitHub)
-CACHE_DIR="/opt/var/cache/nfqws-menu"
+CACHE_DIR="/opt/etc/nfqws-menu"
 
 cache_strategy_path() {
   # $1=ver(1|2) $2=имя.conf или default
@@ -298,6 +305,63 @@ _http_get_file() {
     return 1
   fi
   [ -f "$dest" ] && [ -s "$dest" ]
+}
+
+# Скачивание с прогрессом (для больших файлов: rkn.list и т.п.)
+# curl: progress-bar; wget: обычный индикатор (без -q).
+_http_get_file_progress() {
+  local url="$1" dest="$2" iface="${3:-}"
+  rm -f "$dest"
+  if command -v curl >/dev/null 2>&1; then
+    if [ -n "$iface" ]; then
+      curl -fL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+        --interface "$iface" --progress-bar -o "$dest" "$url"
+    else
+      curl -fL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+        --progress-bar -o "$dest" "$url"
+    fi
+  elif [ -z "$iface" ] && command -v wget >/dev/null 2>&1; then
+    # без -q — показывает % / скорость
+    wget -O "$dest" -T "$WGET_TIMEOUT" --no-cache "$url" || \
+      wget -O "$dest" -T "$WGET_TIMEOUT" "$url"
+  else
+    return 1
+  fi
+  [ -f "$dest" ] && [ -s "$dest" ]
+}
+
+# Как download_file, но с отображением хода (stderr).
+download_file_progress() {
+  local url="$1" dest="$2" alt iface
+  mkdir -p "$(dirname "$dest")" 2>/dev/null || true
+  rm -f "$dest"
+
+  for alt in $(github_alt_urls "$url"); do
+    if [ "$alt" != "$url" ]; then
+      info "Зеркало: $alt" >&2
+    fi
+    if _http_get_file_progress "$alt" "$dest"; then
+      [ "$alt" != "$url" ] && info "Скачано через зеркало" >&2
+      return 0
+    fi
+    rm -f "$dest"
+  done
+
+  if command -v curl >/dev/null 2>&1; then
+    for iface in $(list_up_fallback_ifaces); do
+      warn "Основной канал недоступен, пробуем через $iface ..." >&2
+      for alt in $(github_alt_urls "$url"); do
+        if _http_get_file_progress "$alt" "$dest" "$iface"; then
+          info "Скачано через $iface" >&2
+          return 0
+        fi
+        rm -f "$dest"
+      done
+    done
+  fi
+
+  rm -f "$dest"
+  return 1
 }
 
 # Скачать URL в stdout: прямой → зеркала GitHub → туннели (--interface).
@@ -1649,17 +1713,41 @@ update_rkn_list() {
   fi
 
   if [ "$skip_download" -eq 0 ]; then
-    info "Скачивание rkn.list (zapret4rocket) ..."
-    info "URL: $RKN_LIST_URL"
-    if ! download_file "$RKN_LIST_URL" "$tmp"; then
-      warn "Основной URL недоступен, пробуем зеркало ..."
-      info "URL: $RKN_LIST_MIRROR_URL"
-      if ! download_file "$RKN_LIST_MIRROR_URL" "$tmp"; then
-        error "Не удалось скачать список (ни GitHub, ни зеркало)."
+    info "Скачивание rkn.list (zapret4rocket, ~2 МБ) ..."
+    # Большой файл: сначала зеркала (часто быстрее при DPI), увеличенный таймаут
+    local _old_max="$CURL_MAX_TIME" _old_wget="$WGET_TIMEOUT" _ok=0 _u
+    CURL_MAX_TIME="${CURL_MAX_TIME_LARGE:-180}"
+    WGET_TIMEOUT="$CURL_MAX_TIME"
+    for _u in \
+      "$RKN_LIST_MIRROR_URL" \
+      "https://cdn.jsdelivr.net/gh/IndeecFOX/zapret4rocket@master/extra_strats/TCP/RKN/List.txt" \
+      "https://fastly.jsdelivr.net/gh/IndeecFOX/zapret4rocket@master/extra_strats/TCP/RKN/List.txt" \
+      "https://ghproxy.net/https://raw.githubusercontent.com/IndeecFOX/zapret4rocket/master/extra_strats/TCP/RKN/List.txt" \
+      "$RKN_LIST_URL"
+    do
+      [ -n "$_u" ] || continue
+      info "URL: $_u"
+      if download_file_progress "$_u" "$tmp"; then
+        # sanity: rkn.list должен быть заметного размера (>100 КБ)
+        local _sz
+        _sz=$(wc -c < "$tmp" 2>/dev/null | tr -d ' ')
+        if [ -n "$_sz" ] && [ "$_sz" -gt 100000 ] 2>/dev/null; then
+          info "Получено: $((_sz / 1024)) КБ"
+          _ok=1
+          break
+        fi
+        warn "Скачано слишком мало байт ($_sz) — пробуем следующий источник..."
         rm -f "$tmp"
-        return 1
+      else
+        warn "Не удалось с этого URL — следующий источник..."
       fi
-      info "Скачано с зеркала."
+    done
+    CURL_MAX_TIME="$_old_max"
+    WGET_TIMEOUT="$_old_wget"
+    if [ "$_ok" -ne 1 ]; then
+      error "Не удалось скачать rkn.list (все источники недоступны или таймаут)."
+      rm -f "$tmp"
+      return 1
     fi
 
     grep -vE '^[[:space:]]*(#|;|$)' "$tmp" | sed 's/[[:space:]]*$//' | grep -vE '^$' > "$cleaned" || true
