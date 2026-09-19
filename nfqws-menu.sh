@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.46"
+SCRIPT_VERSION="0.6.47"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -198,80 +198,166 @@ list_up_fallback_ifaces() {
   done
 }
 
-# Скачать URL в stdout (curl → wget; при неудаче — curl --interface через туннели).
-fetch_url() {
-  local url="$1" iface
+# Локальный кэш загрузок (offline / при блокировке GitHub)
+CACHE_DIR="/opt/var/cache/nfqws-menu"
+
+cache_strategy_path() {
+  # $1=ver(1|2) $2=имя.conf или default
+  local ver="$1" name="$2"
+  echo "${CACHE_DIR}/strategies/nfqws${ver}/${name}"
+}
+
+save_strategy_cache() {
+  # $1=ver $2=name $3=src_file
+  local ver="$1" name="$2" src="$3" dest
+  [ -f "$src" ] && [ -s "$src" ] || return 1
+  dest=$(cache_strategy_path "$ver" "$name")
+  mkdir -p "$(dirname "$dest")" 2>/dev/null || true
+  cp "$src" "$dest" 2>/dev/null || return 1
+  return 0
+}
+
+list_strategies_from_cache() {
+  local ver="$1" d
+  d="${CACHE_DIR}/strategies/nfqws${ver}"
+  [ -d "$d" ] || return 1
+  # только *.conf, не default (его показываем отдельно)
+  ls -1 "$d"/*.conf 2>/dev/null | while read -r f; do
+    [ -f "$f" ] && [ -s "$f" ] || continue
+    basename "$f"
+  done
+}
+
+# Альтернативные URL для raw.githubusercontent.com / api.github.com (зеркала CDN).
+# Печатает по одному URL на строку; исходный — первым.
+github_alt_urls() {
+  local url="$1" rest owner repo ref path_rest
+  printf '%s\n' "$url"
+
+  # raw.githubusercontent.com/OWNER/REPO/REF/PATH
+  case "$url" in
+    https://raw.githubusercontent.com/*)
+      rest="${url#https://raw.githubusercontent.com/}"
+      owner="${rest%%/*}"; rest="${rest#*/}"
+      repo="${rest%%/*}"; rest="${rest#*/}"
+      ref="${rest%%/*}"; path_rest="${rest#*/}"
+      if [ -n "$owner" ] && [ -n "$repo" ] && [ -n "$ref" ] && [ -n "$path_rest" ]; then
+        # refs/heads/main → main для jsDelivr
+        case "$ref" in
+          refs/heads/*) ref="${ref#refs/heads/}" ;;
+          refs/tags/*)  ref="${ref#refs/tags/}" ;;
+        esac
+        printf '%s\n' "https://cdn.jsdelivr.net/gh/${owner}/${repo}@${ref}/${path_rest}"
+        printf '%s\n' "https://fastly.jsdelivr.net/gh/${owner}/${repo}@${ref}/${path_rest}"
+        printf '%s\n' "https://ghproxy.net/https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${path_rest}"
+      fi
+      ;;
+    https://api.github.com/*)
+      printf '%s\n' "https://ghproxy.net/${url}"
+      ;;
+  esac
+}
+
+# Одна попытка HTTP GET в stdout
+_http_get_stdout() {
+  local url="$1" iface="${2:-}"
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
-      "$url" 2>/dev/null && return 0
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO- -T "$WGET_TIMEOUT" "$url" 2>/dev/null && return 0
+    if [ -n "$iface" ]; then
+      curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+        --interface "$iface" "$url" 2>/dev/null
+    else
+      curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+        "$url" 2>/dev/null
+    fi
+  elif [ -z "$iface" ] && command -v wget >/dev/null 2>&1; then
+    wget -qO- -T "$WGET_TIMEOUT" "$url" 2>/dev/null
+  else
+    return 1
   fi
-  # fallback через туннели (только curl --interface)
-  # сообщения в stderr, чтобы не портить stdout при пайпах (list_strategies и т.п.)
+}
+
+# Одна попытка HTTP GET в файл
+_http_get_file() {
+  local url="$1" dest="$2" iface="${3:-}"
+  rm -f "$dest"
+  if command -v curl >/dev/null 2>&1; then
+    if [ -n "$iface" ]; then
+      curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+        --interface "$iface" \
+        -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+        "$url" -o "$dest" 2>/dev/null
+    else
+      curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+        -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+        "$url" -o "$dest" 2>/dev/null
+    fi
+  elif [ -z "$iface" ] && command -v wget >/dev/null 2>&1; then
+    wget -qO "$dest" -T "$WGET_TIMEOUT" --no-cache "$url" 2>/dev/null || \
+      wget -qO "$dest" -T "$WGET_TIMEOUT" "$url" 2>/dev/null
+  else
+    return 1
+  fi
+  [ -f "$dest" ] && [ -s "$dest" ]
+}
+
+# Скачать URL в stdout: прямой → зеркала GitHub → туннели (--interface).
+fetch_url() {
+  local url="$1" alt iface body
+  # 1) оригинал + CDN-зеркала
+  for alt in $(github_alt_urls "$url"); do
+    if body=$(_http_get_stdout "$alt"); then
+      if [ -n "$body" ]; then
+        [ "$alt" != "$url" ] && info "Скачано через зеркало" >&2
+        printf '%s' "$body"
+        return 0
+      fi
+    fi
+  done
+  # 2) туннели
   if command -v curl >/dev/null 2>&1; then
     for iface in $(list_up_fallback_ifaces); do
       warn "Основной канал недоступен, пробуем через $iface ..." >&2
-      if curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
-           --interface "$iface" "$url" 2>/dev/null; then
-        info "Скачано через $iface" >&2
-        return 0
-      fi
+      for alt in $(github_alt_urls "$url"); do
+        if body=$(_http_get_stdout "$alt" "$iface"); then
+          if [ -n "$body" ]; then
+            info "Скачано через $iface" >&2
+            printf '%s' "$body"
+            return 0
+          fi
+        fi
+      done
     done
   fi
   return 1
 }
 
-# Скачать URL в файл (curl → wget; при неудаче — curl --interface через туннели).
-# При ошибке/404/пустом ответе файл не оставляем.
+# Скачать URL в файл: прямой → зеркала → туннели. Пустые/битые не оставляем.
 download_file() {
-  local url="$1" dest="$2" ok=0 iface
+  local url="$1" dest="$2" alt iface
   mkdir -p "$(dirname "$dest")" 2>/dev/null || true
   rm -f "$dest"
 
-  # 1) основной канал (короткие таймауты → быстрее переход на fallback).
-  # wget только если curl нет — иначе при блокировке ждём два таймаута подряд.
-  if command -v curl >/dev/null 2>&1; then
-    if curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
-         -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
-         "$url" -o "$dest" 2>/dev/null; then
-      ok=1
-    else
-      rm -f "$dest"
+  for alt in $(github_alt_urls "$url"); do
+    if _http_get_file "$alt" "$dest"; then
+      [ "$alt" != "$url" ] && info "Скачано через зеркало" >&2
+      return 0
     fi
-  elif command -v wget >/dev/null 2>&1; then
-    if wget -qO "$dest" -T "$WGET_TIMEOUT" --no-cache "$url" 2>/dev/null || \
-       wget -qO "$dest" -T "$WGET_TIMEOUT" "$url" 2>/dev/null; then
-      ok=1
-    else
-      rm -f "$dest"
-    fi
-  fi
+    rm -f "$dest"
+  done
 
-  # 2) fallback через туннели (только curl --interface)
-  # сообщения в stderr — иначе попадают в stdout при list=$(list_strategies …) и т.п.
-  if [ "$ok" -eq 0 ] && command -v curl >/dev/null 2>&1; then
+  if command -v curl >/dev/null 2>&1; then
     for iface in $(list_up_fallback_ifaces); do
       warn "Основной канал недоступен, пробуем через $iface ..." >&2
-      rm -f "$dest"
-      if curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
-           --interface "$iface" \
-           -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
-           "$url" -o "$dest" 2>/dev/null; then
-        if [ -f "$dest" ] && [ -s "$dest" ]; then
-          ok=1
+      for alt in $(github_alt_urls "$url"); do
+        if _http_get_file "$alt" "$dest" "$iface"; then
           info "Скачано через $iface" >&2
-          break
+          return 0
         fi
-      fi
-      rm -f "$dest"
+        rm -f "$dest"
+      done
     done
   fi
 
-  # 404/пустой ответ: wget иногда пишет 0-байтный файл при ошибке
-  if [ "$ok" -eq 1 ] && [ -f "$dest" ] && [ -s "$dest" ]; then
-    return 0
-  fi
   rm -f "$dest"
   return 1
 }
@@ -761,23 +847,28 @@ list_strategies_from_sums() {
 }
 
 list_strategies() {
-  # 1) корневой SHA256SUMS (без API)  2) GitHub Contents API fallback
+  # 1) SHA256SUMS  2) GitHub API  3) локальный кэш (offline)
   local ver="$1"
-  local list="" url
+  local list="" url cache_list
 
   if ensure_repo_sha256sums; then
     list=$(list_strategies_from_sums "$ver" || true)
   fi
+  if [ -z "$list" ]; then
+    url="${STRATEGIES_API}/${ver}"
+    list=$(fetch_url "$url" 2>/dev/null | grep -o '"name": *"[^"]*\.conf"' | sed 's/.*"\([^"]*\)".*/\1/' || true)
+  fi
+
+  cache_list=$(list_strategies_from_cache "$ver" 2>/dev/null || true)
+  if [ -n "$cache_list" ]; then
+    list=$(printf '%s\n%s\n' "$list" "$cache_list" | grep -E '\.conf$' | sort -u)
+  fi
+
   if [ -n "$list" ]; then
-    # только имена *.conf (защита от мусора в stdout при fallback-сообщениях)
     printf '%s\n' "$list" | grep -E '\.conf$' || true
     return 0
   fi
-
-  url="${STRATEGIES_API}/${ver}"
-  # через fetch_url — с fallback по туннелям при блокировке основного канала
-  # stderr не глушим: видны сообщения «пробуем через …»
-  fetch_url "$url" | grep -o '"name": *"[^"]*\.conf"' | sed 's/.*"\([^"]*\)".*/\1/'
+  return 1
 }
 
 
@@ -1107,8 +1198,26 @@ apply_strategy() {
   info "URL: $conf_path"
   tmp="/tmp/nfqws-strategy-$$.conf"
   if ! download_file "$conf_path" "$tmp"; then
-    error "Не удалось скачать $conf_path"
-    return 1
+    # default: запасной branch main
+    if [ "$conf_name" = "default" ] && echo "$conf_path" | grep -q '/master/'; then
+      conf_path=$(echo "$conf_path" | sed 's|/master/|/main/|')
+      info "Пробуем branch main: $conf_path"
+      download_file "$conf_path" "$tmp" || true
+    fi
+  fi
+  if [ ! -s "$tmp" ]; then
+    # offline: локальный кэш
+    local cache_file
+    cache_file=$(cache_strategy_path "$ver" "$conf_name")
+    if [ -f "$cache_file" ] && [ -s "$cache_file" ]; then
+      warn "Сеть недоступна — берём из кэша: $cache_file"
+      cp "$cache_file" "$tmp"
+    else
+      error "Не удалось скачать $conf_path (и нет кэша offline)"
+      return 1
+    fi
+  else
+    save_strategy_cache "$ver" "$conf_name" "$tmp" 2>/dev/null || true
   fi
 
   # CRLF → LF: иначе source конфига даёт «: not found» и ломает порты в iptables
@@ -1292,8 +1401,8 @@ menu_strategy() {
   info "Доступные стратегии ($dir):"
   list=$(list_strategies "$dir" || true)
   if [ -z "$list" ]; then
-    warn "Не удалось получить список стратегий (SHA256SUMS / GitHub API)."
-    warn "Будет доступен только default из официального репозитория nfqws."
+    warn "Не удалось получить список стратегий (сеть / GitHub)."
+    warn "Пробуем зеркала CDN и offline-кэш; default — из nfqws или кэша."
   fi
 
   i=1
@@ -1489,7 +1598,7 @@ inject_rkn_into_mode_list() {
       { print }
     ' "$conf" > "$tmp_conf" && mv "$tmp_conf" "$conf"
     if grep -qF -- "$hostlist_arg" "$conf" 2>/dev/null; then
-      info "В MODE_LIST восстановлено/добавлено: $hostlist_arg"
+      info "В MODE_LIST добавлено: $hostlist_arg"
       return 0
     fi
     warn "Не удалось изменить MODE_LIST автоматически — добавьте вручную:"
