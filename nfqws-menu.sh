@@ -2340,6 +2340,7 @@ menu_update_hosts() {
   local all_num=$i
   printf ' %s) все\n' "$all_num"
   printf ' %s88) удалить записи из hosts%s\n' "$RED" "$NC"
+  printf ' %s99) Просмотреть записи в host%s\n' "$YELLOW" "$NC"
   printf ' 0) Отмена\n'
   printf '%s\n' "${DIM}────────────────────────────────────────────────────────${NC}"
   ask "Выберите варианты: "
@@ -2349,6 +2350,42 @@ menu_update_hosts() {
     rm -f "$tmp" "$sec_file"
     return 0
   }
+
+  # 99 — просмотреть текущие записи ip host на роутере
+  local want_view=0
+  for c in $(echo "$raw_choices" | tr ',;' '  '); do
+    [ "$c" = "99" ] && want_view=1 && break
+  done
+  if [ "$want_view" -eq 1 ]; then
+    echo
+    printf '%s\n' "${BOLD}${YELLOW}Текущие записи ip host на роутере:${NC}"
+    printf '%s\n' "${DIM}────────────────────────────────────────────────────────${NC}"
+    local view_out view_cnt=0 line
+    # Keenetic 4.2+: show running-config / show run содержат строки «ip host DOMAIN IP»
+    view_out=$(ndmc_cli "show running-config" 2>/dev/null) || view_out=""
+    if [ -z "$view_out" ]; then
+      view_out=$(ndmc_cli "show run" 2>/dev/null) || view_out=""
+    fi
+    if [ -n "$view_out" ]; then
+      view_cnt=$(printf '%s\n' "$view_out" | grep -cE '^[[:space:]]*ip host[[:space:]]' || true)
+      printf '%s\n' "$view_out" | grep -E '^[[:space:]]*ip host[[:space:]]' | while IFS= read -r line || [ -n "$line" ]; do
+        set -- $line
+        if [ "$1" = "ip" ] && [ "$2" = "host" ] && [ -n "$3" ] && [ -n "$4" ]; then
+          printf '  %s%-40s%s %s➔%s %s\n' "$CYAN" "$3" "$NC" "$DIM" "$NC" "$4"
+        else
+          printf '  %s\n' "$line"
+        fi
+      done
+    fi
+    if [ -z "$view_out" ] || [ "${view_cnt:-0}" -eq 0 ]; then
+      printf '  %s— записей ip host нет —%s\n' "$DIM" "$NC"
+    else
+      printf '%s\n' "${DIM}────────────────────────────────────────────────────────${NC}"
+      info "Всего: $view_cnt"
+    fi
+    rm -f "$tmp" "$sec_file"
+    return 0
+  fi
 
   # 88 — удалить все домены из hosts-файла
   local want_delete=0
