@@ -1252,7 +1252,7 @@ menu_strategy() {
     files="$files $f"
     i=$((i + 1))
   done
-  echo "  99) восстановление из backup"
+  printf '  %s99) Восстановление из backup%s\n' "${YELLOW}${BOLD}" "$NC"
   echo "   0) Назад"
   ask "Номер стратегии: "
   read -r num
