@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.43"
+SCRIPT_VERSION="0.6.44"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -1874,8 +1874,9 @@ dot_servers_data() {
 32|Xbox-DNS|xbox-dns.ru|xbox-dns.ru|
 33|Comss DNS|dns.comss.one|dns.comss.one|
 34|Malw Link|dns.malw.link|dns.malw.link|
-35|Cloudflare Gateway|5u35p8m9i7.cloudflare-gateway.com|5u35p8m9i7.cloudflare-gateway.com|
-36|Geo Hide|geohide.ru|geohide.ru|
+35|NullsProxy|dns.nullsproxy.com|dns.nullsproxy.com|
+36|Cloudflare Gateway|5u35p8m9i7.cloudflare-gateway.com|5u35p8m9i7.cloudflare-gateway.com|
+37|Geo Hide|geohide.ru|geohide.ru|
 EOF
 }
 
@@ -1906,8 +1907,9 @@ doh_servers_data() {
 22|Xbox-DNS|https://xbox-dns.ru/dns-query
 23|Comss DNS|https://dns.comss.one/dns-query
 24|Malw Link|https://dns.malw.link/dns-query
-25|Cloudflare Gateway|https://5u35p8m9i7.cloudflare-gateway.com/dns-query
-26|Geo Hide|https://dns.geohide.ru/dns-query
+25|NullsProxy|https://dns.nullsproxy.com/dns-query
+26|Cloudflare Gateway|https://5u35p8m9i7.cloudflare-gateway.com/dns-query
+27|Geo Hide|https://dns.geohide.ru/dns-query
 EOF
 }
 
@@ -1958,10 +1960,11 @@ add_dot_menu() {
   echo "32) Xbox-DNS (xbox-dns.ru)"
   echo "33) Comss DNS (dns.comss.one)"
   echo "34) Malw Link (dns.malw.link)"
-  echo "35) Cloudflare Gateway (5u35p8m9i7.cloudflare-gateway.com)"
-  echo "36) Geo Hide (geohide.ru)"
+  echo "35) NullsProxy (dns.nullsproxy.com)"
+  echo "36) Cloudflare Gateway (5u35p8m9i7.cloudflare-gateway.com)"
+  echo "37) Geo Hide (geohide.ru)"
   printf '%s\n' " ${YELLOW}--- Свой вариант ---${NC}"
-  echo "37) Ввести вручную (IP / Port / SNI)"
+  echo "38) Ввести вручную (IP / Port / SNI)"
   echo " 0) Отмена"
   printf '%s\n' "${DIM}────────────────────────────────────────────────────────${NC}"
   ask "Выберите варианты: "
@@ -1973,7 +1976,7 @@ add_dot_menu() {
 
   local added_any=0 choice num label ip sni port
   for choice in $(echo "$raw_choices" | tr ',' ' '); do
-    if [ "$choice" = "37" ]; then
+    if [ "$choice" = "38" ]; then
       ask "Введите IP/Хост: "; read -r manual_ip
       ask "Введите Порт (по умолчанию 853, отмена - Enter): "; read -r manual_port
       ask "Введите SNI (отмена - Enter): "; read -r manual_sni
@@ -2028,10 +2031,11 @@ add_doh_menu() {
   echo "22) Xbox-DNS (https://xbox-dns.ru/dns-query)"
   echo "23) Comss DNS Keenetic/MikroTik (https://dns.comss.one/dns-query)"
   echo "24) Malw Link (https://dns.malw.link/dns-query)"
-  echo "25) Cloudflare Gateway (https://5u35p8m9i7.cloudflare-gateway.com/dns-query)"
-  echo "26) Geo Hide (https://dns.geohide.ru/dns-query)"
+  echo "25) NullsProxy (https://dns.nullsproxy.com/dns-query)"
+  echo "26) Cloudflare Gateway (https://5u35p8m9i7.cloudflare-gateway.com/dns-query)"
+  echo "27) Geo Hide (https://dns.geohide.ru/dns-query)"
   printf '%s\n' " ${YELLOW}--- Свой вариант ---${NC}"
-  echo "27) Ввести вручную (произвольный URI)"
+  echo "28) Ввести вручную (произвольный URI)"
   echo " 0) Отмена"
   printf '%s\n' "${DIM}────────────────────────────────────────────────────────${NC}"
   ask "Выберите варианты: "
@@ -2043,7 +2047,7 @@ add_doh_menu() {
 
   local added_any=0 choice line uri
   for choice in $(echo "$raw_choices" | tr ',' ' '); do
-    if [ "$choice" = "27" ]; then
+    if [ "$choice" = "28" ]; then
       ask "Введите URI DoH сервера: "; read -r manual_uri
       if [ -n "$manual_uri" ]; then
         apply_doh "$manual_uri" "$domain"
@@ -2069,7 +2073,9 @@ add_domain_menu() {
   echo " 4) Malw Link DoH (dns.malw.link) ➔ ntc.party"
   echo " 5) Xbox-DNS DoT ➔ gql.twitch.tv & usher.ttvnw.net"
   echo " 6) Xbox-DNS DoH ➔ gql.twitch.tv & usher.ttvnw.net"
-  echo " 7) Ввести свой домен и выбрать сервер"
+  echo " 7) NullsProxy DoT ➔ Supercell (Brawl/CoC/CR)"
+  echo " 8) NullsProxy DoH ➔ Supercell (Brawl/CoC/CR)"
+  echo " 9) Ввести свой домен и выбрать сервер"
   echo " 0) Отмена"
   printf '%s\n' "${DIM}────────────────────────────────────────────────────────${NC}"
   ask "Выберите варианты: "
@@ -2098,6 +2104,24 @@ add_domain_menu() {
         added_any=1
         ;;
       7)
+        # Supercell via NullsProxy DoT
+        apply_dot "dns.nullsproxy.com" "dns.nullsproxy.com" "supercell.com"
+        apply_dot "dns.nullsproxy.com" "dns.nullsproxy.com" "supercellid.com"
+        apply_dot "dns.nullsproxy.com" "dns.nullsproxy.com" "brawlstarsgame.com"
+        apply_dot "dns.nullsproxy.com" "dns.nullsproxy.com" "clashofclans.com"
+        apply_dot "dns.nullsproxy.com" "dns.nullsproxy.com" "clashroyaleapp.com"
+        added_any=1
+        ;;
+      8)
+        # Supercell via NullsProxy DoH
+        apply_doh "https://dns.nullsproxy.com/dns-query" "supercell.com"
+        apply_doh "https://dns.nullsproxy.com/dns-query" "supercellid.com"
+        apply_doh "https://dns.nullsproxy.com/dns-query" "brawlstarsgame.com"
+        apply_doh "https://dns.nullsproxy.com/dns-query" "clashofclans.com"
+        apply_doh "https://dns.nullsproxy.com/dns-query" "clashroyaleapp.com"
+        added_any=1
+        ;;
+      9)
         ask "Введите домен (например: example.com): "; read -r dom
         [ -z "$dom" ] && continue
         echo "Тип протокола: 1) DoT  2) DoH"
