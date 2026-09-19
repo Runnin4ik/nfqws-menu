@@ -4,7 +4,7 @@
 
 Репозиторий также служит хранилищем готовых **стратегий** обхода DPI, **blobs** и **lists**.
 
-- Скрипт: [`nfqws-menu.sh`](nfqws-menu.sh) (текущая версия **0.6.40**)
+- Скрипт: [`nfqws-menu.sh`](nfqws-menu.sh) (текущая версия **0.6.49**)
 - Стратегии: [`strategies/`](strategies/)
 - Hosts: [`hosts`](hosts)
 - Контрольные суммы: [`SHA256SUMS`](SHA256SUMS), [`strategies/blobs/SHA256SUMS`](strategies/blobs/SHA256SUMS)
@@ -128,9 +128,11 @@ menu
 - Показывает список `.conf` из:
   - `strategies/nfqws1/` — для v1
   - `strategies/nfqws2/` — для v2
-- Список стратегий: сначала из корневого **`SHA256SUMS`** (без GitHub API), при недоступности — GitHub Contents API.
-- Скачивает выбранный файл, делает **бэкап** текущего конфига и применяет стратегию.
-- Перед записью **нормализует CRLF → LF** (Windows-переводы строк в `.conf` иначе ломают `source` и iptables: `: not found`, `invalid port/service`).
+- Список стратегий: **`SHA256SUMS`** → GitHub API → **локальный offline-кэш** (`/opt/etc/nfqws-menu/strategies/…`).
+- Скачивание: основной raw GitHub → зеркала **jsDelivr / Fastly jsDelivr / ghproxy** → fallback через туннель-интерфейсы (`awg0`, `t2s0`, …); успешный файл сохраняется в offline-кэш.
+- Делает **бэкап** текущего конфига и применяет стратегию.
+- Перед записью **нормализует CRLF → LF** (иначе `source`/iptables: `: not found`, `invalid port/service`).
+- **Пункт 99** — восстановление из backup: `.bak.*` от свежего к старому (самый свежий выделен), рядом имя стратегии из `general (…)` в файле; `fix_isp_interface`, перезапуск сервиса.
 - После применения выполняет пост-настройку:
 
 #### ISP_INTERFACE / IPV6_ENABLED
@@ -138,9 +140,10 @@ menu
 - Определяет интерфейс провайдера из default route (`ip route` / `route`), сравнивает с `ISP_INTERFACE` в конфиге и при необходимости предлагает установить правильное значение. При чтении значения снимаются `\r`, кавычки и пробелы (защита от CRLF в выводе меню).
 - Проверяет наличие **глобального IPv6** (`2a00*`) на интерфейсе провайдера и выставляет `IPV6_ENABLED=0|1` в конфиге.
 
-#### Восстановление rkn.list
+#### Восстановление rkn.list и POLICY_*
 
-Если до смены стратегии в `MODE_LIST` уже был `--hostlist=…/rkn.list`, привязка **восстанавливается** после применения новой стратегии (полный `.conf` иначе затёр бы её).
+- Если до смены стратегии в `MODE_LIST` уже был `--hostlist=…/rkn.list`, привязка **восстанавливается** автоматически.
+- **`POLICY_NAME` / `POLICY_EXCLUDE`**: стандартные значения (`nfqws` / `0`) не трогаются; **нестандартные** предлагается восстановить (**по умолчанию: Нет**).
 
 #### Проверка blobs (наличие + SHA256)
 
@@ -227,18 +230,22 @@ menu
 
 - Просмотр текущих DoT/DoH и персональных привязок к доменам
 - Счётчик слотов **N/8** — только секция **System** (Policy0/1 и `*-filters` не учитываются)
-- Пресеты DoT/DoH: Яндекс, Cloudflare, Google, Quad9, CleanBrowsing, OpenDNS, DNS.SB, dns0.eu, OpenNameServer, AdGuard (Default/Family), ControlD Free, DNS4EU (Protective/Unfiltered), Alibaba DNS, DNSPod, Proxy-DNS, Cloudflare Gateway и др. (Tiar Japan убраны) или ручной ввод
+- Пресеты DoT/DoH: Яндекс, Cloudflare, Google, Quad9, CleanBrowsing, OpenDNS, DNS.SB, dns0.eu, OpenNameServer, AdGuard (Default/Family), ControlD Free, DNS4EU, Alibaba DNS, DNSPod, **NullsProxy**, Proxy-DNS, Cloudflare Gateway и др. (Tiar Japan убраны) или ручной ввод
 - Быстрая привязка доменов (пресеты):
 
 | № | Описание |
 | --- | --- |
 | 1 | CleanBrowsing DoT → instagram.com |
 | 2 | CleanBrowsing DoH → instagram.com |
-| 3 | sw.ext.io DoT → rutor.is & rutor.info |
-| 4 | Malw Link DoH → ntc.party |
-| 5 | Xbox-DNS DoT → gql.twitch.tv & usher.ttvnw.net |
-| 6 | Xbox-DNS DoH → gql.twitch.tv & usher.ttvnw.net |
-| 7 | Ввести свой домен и выбрать сервер |
+| 3 | CleanBrowsing DoT → cdninstagram.com |
+| 4 | CleanBrowsing DoH → cdninstagram.com |
+| 5 | sw.ext.io DoT → rutor.is & rutor.info |
+| 6 | Malw Link DoH → ntc.party |
+| 7 | Xbox-DNS DoT → gql.twitch.tv & usher.ttvnw.net |
+| 8 | Xbox-DNS DoH → gql.twitch.tv & usher.ttvnw.net |
+| 9 | NullsProxy DoT → Supercell (supercell.com, supercellid.com, brawlstarsgame.com, clashofclans.com, clashroyaleapp.com) |
+| 10 | NullsProxy DoH → те же домены Supercell |
+| 11 | Ввести свой домен и выбрать сервер |
 
 - Удаление upstream-ов с сохранением конфигурации
 
@@ -365,10 +372,33 @@ IFACE="opkgtun0"
 
 ## Changelog
 
+### 0.6.47 – 0.6.49
+
+- **Загрузки** — зеркала CDN для raw/API GitHub: jsDelivr, Fastly jsDelivr, ghproxy; offline-кэш стратегий в `/opt/etc/nfqws-menu/strategies/`
+- **Список стратегий** — SUMS → API → offline-кэш
+- **DNS (п. 9)** — пресет **NullsProxy**; привязки доменов: cdninstagram, Supercell через NullsProxy (п. 9–10), свой домен → 11
+
+### 0.6.46
+
+- **п. 3 apply_strategy** — `POLICY_NAME` / `POLICY_EXCLUDE`: стандартные (`nfqws` / `0`) не трогаются; нестандартные — восстановление по запросу (y/N)
+
+### 0.6.43 – 0.6.45
+
+- **п. 3 → 99 backup** — список `.bak.*` от свежего к старому; самый свежий выделен жёлтым; рядом со стратегией из конфига (`general (ALT11)`)
+
+### 0.6.42
+
+- **download_file** — сообщения fallback («Основной канал недоступен…», «Скачано через…») уходят в **stderr**, чтобы не попадали в `list=$(list_strategies …)` и не ломали нумерацию меню
+- **list_strategies** — дополнительно фильтрует только строки `*.conf`
+
+### 0.6.41
+
+- **п. 3 Выбор стратегии** — в конце списка добавлен **99) восстановление из backup**: вывод `nfqws.conf.bak.YYYYMMDDHHMMSS` (V1) / `nfqws2.conf.bak.…` (V2), выбор файла, запись без бэкапа текущего, `fix_isp_interface`, перезапуск сервиса
+
 ### 0.6.40
 
-- **Таймауты загрузок** — увеличены для сильного DPI: connect 10 с, max 30 с, wget 25 с (раньше 5 / 15 / 12)
-- **п. 5 rkn.list** — при недоступности GitHub raw пробуется зеркало `http://mizulina.shit.vc:666/...` (как в zapret4rocket); URL основного источника упрощён (`…/master/…` без `refs/heads`)
+- **Таймауты загрузок** — увеличены для сильного DPI: connect 10 с, max 30 с, wget 25 с (раньше 5 / 15 / 12); для крупных файлов (rkn) — до 180 с
+- **п. 5 rkn.list** — при недоступности GitHub raw: jsDelivr / Fastly / ghproxy / зеркало `mizulina.shit.vc`; URL основного источника упрощён (`…/master/…` без `refs/heads`)
 
 ### 0.6.36 – 0.6.39
 
