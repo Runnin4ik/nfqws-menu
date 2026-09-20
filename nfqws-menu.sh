@@ -1864,7 +1864,7 @@ DOT_DOH_STRATEGY='               #DNS
                --payload=tls_client_hello
                --lua-desync=circular:fails=2:time=60:retrans=3:nld=2
                --lua-desync=multisplit:pos=sniext+2:seqovl=3:padencap
-               --lua-desync=fake:blob=fake_default_tls:optional:tcp_seq=-10000:tcp_ack=-66000:badsum:tls_mod=rnd,dupsid,sni=rzd.ru:repeat=2
+               --lua-desync=fake:blob=fake_default_tls:optional:tcp_seq=-10000:tcp_ack=-66000:badsum:tls_mod=rnd,dupsid,sni=rzd.ru:repeats=2
                --new
                --filter-udp=853 --filter-l7=quic
                --hostlist-domains=dns.adguard-dns.com,dns.nextdns.io
