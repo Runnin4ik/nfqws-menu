@@ -4,7 +4,7 @@
 
 Репозиторий также служит хранилищем готовых **стратегий** обхода DPI, **blobs** и **lists**.
 
-- Скрипт: [`nfqws-menu.sh`](nfqws-menu.sh) (текущая версия **0.6.49**)
+- Скрипт: [`nfqws-menu.sh`](nfqws-menu.sh) (текущая версия **0.6.58**)
 - Стратегии: [`strategies/`](strategies/)
 - Hosts: [`hosts`](hosts)
 - Контрольные суммы: [`SHA256SUMS`](SHA256SUMS), [`strategies/blobs/SHA256SUMS`](strategies/blobs/SHA256SUMS)
@@ -84,14 +84,17 @@ menu
       13. TG WS Proxy Go
       14. usque-keenetic
       15. MagiTrickle
+      16. telemt / telemt-panel
 
-[::]  СЕРВИС
+[::]  СЕРВИС (S)
       77. Change language
       88. Удаление пакетов
 
       99. Обновить скрипт
       00. Выход
 ```
+
+Горячие клавиши: **S** — сервисные утилиты (UPX, Dropbear fix, upgrade пакетов); **U** — `opkg update && opkg upgrade`.
 
 Пример блока статуса:
 
@@ -107,13 +110,22 @@ menu
 
 ### 1. Установка NFQWS / NFQWS2
 
-- Выбор версии: **nfqws-keenetic** (v1) или **nfqws2-keenetic** (v2).
+Подменю:
+
+```
+1) nfqws-keenetic  (версия 1)
+2) nfqws2-keenetic (версия 2)
+3) патч десинка TLS reasm  (замена bin nfqws2)
+0) Назад
+```
+
 - Установка зависимостей (`ca-certificates`, `wget-ssl`, удаление `wget-nossl`).
 - Добавление официального opkg-репозитория под архитектуру.
-- Установка пакета.
-- Предложение установить веб-интерфейс.
+- Установка пакета; при установке v2, если уже стоит v1 — предложение удалить старый пакет.
 
-> При установке v2, если уже стоит v1, скрипт предложит удалить старый пакет (рекомендуется).
+#### Патч TLS reasm (п. 1 → 3)
+
+Только при установленном **nfqws2-keenetic**. Замена бинарника `nfqws2` сборкой с фиксом TLS reasm из [MarkinAlexander/zapret2-keenetic-binaries](https://github.com/MarkinAlexander/zapret2-keenetic-binaries) (`v1.0.5.1-reasm-fix`, каталог под архитектуру `linux-*`): stop сервиса → бэкап текущего bin → замена → start.
 
 ### 2. Установка веб-интерфейса
 
@@ -336,6 +348,34 @@ IFACE="opkgtun0"
 - Init: `/opt/etc/init.d/S99magitrickle` (start | stop | restart | status)
 - Удаление — в п. 88 (с опциональным удалением `/opt/etc/opkg/magitrickle.conf`)
 
+### 16. telemt / telemt-panel
+
+Telegram MTProto-прокси на Rust (полная реализация официального алгоритма + расширения). Скрипты: [augin/telemt_script](https://github.com/augin/telemt_script) (Entware / Keenetic, рекомендуется **aarch64**).
+
+Подменю:
+
+```
+1. Установка telemt
+2. Установка telemt-panel
+3. Эмуляция systemD
+4. Удаление
+0. Назад
+```
+
+- Установщики запускаются с привязкой к `/dev/tty` (интерактивные скрипты).
+- П. 3 — эмуляция systemctl для Entware ([anch665/keendev](https://github.com/anch665/keendev) и аналоги), если нужна совместимость с unit-скриптами.
+- Статус telemt / telemt-panel отображается в блоке установленных компонентов; удаление — здесь или в п. 88.
+
+### S. Сервисные утилиты
+
+В главном меню: клавиша **S** (или раздел «СЕРВИС»).
+
+| Пункт | Действие |
+| --- | --- |
+| 1 | **Сжать bin/sbin (UPX)** — `upx --lzma --best` для `/opt/bin`, `/opt/sbin`, `/opt/usr/bin`, `/opt/libexec` (при необходимости ставит `upx`) |
+| 2 | **Dropbear fix** — скрипт `sw.ext.io/ent/_addons/dropbear_fix` (с опцией сброса пароля root или без) |
+| U | **Обновить все пакеты** — `opkg update && opkg upgrade` (также клавиша **U** из главного меню) |
+
 ### 77. Change language
 
 Мгновенное переключение интерфейса **ru ↔ en** (файл `/opt/etc/nfqws-menu.lang`).
@@ -348,7 +388,7 @@ IFACE="opkgtun0"
 Удаление:
   [N] nfqws2-keenetic / nfqws-keenetic-web / dpi-detector /
       awg-manager / tg-ws-proxy / usque-keenetic /
-      magitrickle / opera-proxy / KeenKit
+      magitrickle / opera-proxy / KeenKit / telemt
   [a] Удалить все пакеты NFQWS
   [b] Удалить резервные копии (.bak.* / *-opkg)
   [0] Назад
@@ -371,6 +411,14 @@ IFACE="opkgtun0"
 ---
 
 ## Changelog
+
+### 0.6.50 – 0.6.58
+
+- **п. 1 → 3** — патч десинка **TLS reasm**: замена bin `nfqws2` из MarkinAlexander/zapret2-keenetic-binaries (`v1.0.5.1-reasm-fix`)
+- **п. 16** — **telemt / telemt-panel** (augin/telemt_script): install / panel / systemD-emu / remove; статус в `show_installed`
+- **S** — сервисные утилиты: UPX-сжатие bin/sbin, Dropbear fix, **U** — `opkg upgrade` всех пакетов
+- **TTY** — `tty_setup` (erase=^H), `read_menu` / `drain_stdin` из `/dev/tty`; удалённые install.sh через tmp + tty
+- **п. 10–12** — без лишнего `confirm` перед запуском установщиков dpi-detector / awg-manager / KeenKit
 
 ### 0.6.47 – 0.6.49
 
@@ -452,10 +500,12 @@ IFACE="opkgtun0"
 - **п. 7** — смена активных **fake:blob** (локальные + из репозитория)
 - **п. 8** — **Обновление hosts** через `ndmc`
 - **п. 15** — **MagiTrickle** (установка/обновление/удаление)
-- **п. 9** (бывш. 6) — Управление DoT/DoH: пресеты Xbox-DNS DoT/DoH для Twitch (`gql.twitch.tv`, `usher.ttvnw.net`)
-- **SHA256** blobs + список стратегий из SUMS; fallback загрузок через VPN/туннель-интерфейсы
-- Нумерация: 5 = rkn.list, 6 = DoT/DoH bypass, 7 = fake:blob, 8 = hosts, 9 = Manage DoT/DoH
-- Статус: отображение magitrickle; удаление opera-proxy / KeenKit / MagiTrickle в п. 88
+- **п. 16** — **telemt / telemt-panel**; **п. 1→3** — патч TLS reasm для nfqws2
+- **S / U** — UPX, Dropbear fix, opkg upgrade
+- **п. 9** (бывш. 6) — Управление DoT/DoH: пресеты Xbox-DNS / NullsProxy / Supercell и др.
+- **SHA256** blobs + список стратегий из SUMS; CDN/offline-кэш; fallback через VPN-туннели
+- Нумерация: 5 = rkn.list, 6 = DoT/DoH bypass, 7 = fake:blob, 8 = hosts, 9 = Manage DoT/DoH, 16 = telemt
+- Статус: magitrickle / telemt; удаление в п. 88
 - Без принудительного `export LD_LIBRARY_PATH` (совместимость ndmc / Entware wget)
 
 ### 0.5.17
