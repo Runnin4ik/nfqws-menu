@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.55"
+SCRIPT_VERSION="0.6.58"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -184,17 +184,47 @@ ask()   { printf '%s' "${CYAN}[?]${NC} $*"; }
 # Общие хелперы
 # ---------------------------------------------------------------------------
 
+# Настройка терминала: канонический ввод + Backspace=^H (иначе печатается «^H»).
+# stty без < /dev/tty трогает не тот fd, если stdin уже не tty.
+tty_setup() {
+  [ -c /dev/tty ] || return 0
+  stty sane < /dev/tty 2>/dev/null || true
+  stty icanon echo < /dev/tty 2>/dev/null || true
+  # Большинство SSH/клиентов на Keenetic шлют BS (ASCII 8 = ^H), а не DEL (^?)
+  stty erase '^H' < /dev/tty 2>/dev/null || \
+    stty erase "$(printf '\010')" < /dev/tty 2>/dev/null || true
+}
+
+# Чтение с реального терминала (не из «хвоста» stdin после curl|sh / установщиков).
+# Использование: read_menu varname
+read_menu() {
+  local _rm_var="$1"
+  if [ -c /dev/tty ]; then
+    read -r "$_rm_var" < /dev/tty
+  else
+    read -r "$_rm_var"
+  fi
+}
+
+# Сбросить буфер stdin, чтобы «Enter» от установщика не проглатывал следующий read.
+drain_stdin() {
+  local _ds
+  while read -r -t 0 _ds 2>/dev/null; do
+    read -r _ds 2>/dev/null || break
+  done
+}
+
 # confirm_yes: Y/n — да по умолчанию. confirm_no: y/N — нет по умолчанию.
 confirm_yes() {
   ask "${1:-Continue?} [Y/n]: "
-  read -r ans
+  read_menu ans
   case "$ans" in n|N|н|Н) return 1 ;; esac
   return 0
 }
 
 confirm_no() {
   ask "${1:-Continue?} [y/N]: "
-  read -r ans
+  read_menu ans
   case "$ans" in y|Y|д|Д) return 0 ;; esac
   return 1
 }
@@ -502,20 +532,33 @@ blob_expected_sha256() {
   ' "$BLOBS_SHA256SUMS_CACHE" 2>/dev/null
 }
 
-# curl|wget | sh для удалённых install.sh
+# Скачать install.sh во временный файл и запустить на реальном tty.
+# curl|sh отдаёт установщику stdin=pipe → интерактивное меню (awg и др.) не открывается.
 run_remote_sh() {
-  local url="$1"
+  local url="$1" tmp rc=0
+  tmp="/tmp/nfqws-remote-$$.sh"
+  rm -f "$tmp"
   if command -v curl >/dev/null 2>&1; then
-    if curl -fsSL "$url" 2>/dev/null | sh; then
-      return 0
-    fi
+    curl -fsSL "$url" -o "$tmp" 2>/dev/null || rm -f "$tmp"
   fi
-  if command -v wget >/dev/null 2>&1; then
-    wget -qO- "$url" | sh
-  else
-    error "Нужны curl или wget."
+  if [ ! -s "$tmp" ] && command -v wget >/dev/null 2>&1; then
+    wget -qO "$tmp" "$url" 2>/dev/null || rm -f "$tmp"
+  fi
+  if [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    error "Не удалось скачать: $url"
     return 1
   fi
+  # Полный tty: stdin+stdout+stderr — иначе awg-menu / интерактив не поднимается
+  if [ -c /dev/tty ]; then
+    sh "$tmp" < /dev/tty > /dev/tty 2>&1 || rc=$?
+  else
+    sh "$tmp" || rc=$?
+  fi
+  rm -f "$tmp"
+  drain_stdin
+  tty_setup
+  return "$rc"
 }
 
 # Записать opkg-репозиторий и обновить индекс
@@ -869,17 +912,146 @@ install_nfqws2() {
   ask_web_install
 }
 
+# Патч nfqws2: TLS reasm desync (MarkinAlexander/zapret2-keenetic-binaries)
+NFQWS2_REASM_TAG="v1.0.5.1-reasm-fix"
+NFQWS2_REASM_BASE="https://raw.githubusercontent.com/MarkinAlexander/zapret2-keenetic-binaries/main/releases/${NFQWS2_REASM_TAG}"
+
+# ARCH / ARCH_RAW → каталог binaries в репозитории патча
+nfqws2_reasm_bin_dir() {
+  local raw="${ARCH_RAW:-}"
+  [ -n "$raw" ] || raw=$(opkg print-architecture 2>/dev/null | sort -k3 -nr | awk '$2!="all"{print $2;exit}')
+  case "$raw" in
+    aarch64*|arm64*) echo "linux-arm64" ;;
+    arm*|armv7*)     echo "linux-arm" ;;
+    mipsel*)         echo "linux-mipsel" ;;
+    mips*)           echo "linux-mips" ;;
+    x86_64*|amd64*)  echo "linux-x86_64" ;;
+    x86*|i386*|i686*) echo "linux-x86" ;;
+    *)
+      # fallback по уже определённому ARCH
+      case "${ARCH:-}" in
+        aarch64) echo "linux-arm64" ;;
+        mipsel)  echo "linux-mipsel" ;;
+        mips)    echo "linux-mips" ;;
+        x86_64)  echo "linux-x86_64" ;;
+        x86)     echo "linux-x86" ;;
+        *)       echo "" ;;
+      esac
+      ;;
+  esac
+}
+
+# Локальный путь к бинарнику nfqws2
+nfqws2_bin_path() {
+  if [ -x /opt/usr/bin/nfqws2 ]; then
+    echo "/opt/usr/bin/nfqws2"
+  elif [ -x /opt/bin/nfqws2 ]; then
+    echo "/opt/bin/nfqws2"
+  elif command -v nfqws2 >/dev/null 2>&1; then
+    command -v nfqws2
+  else
+    echo ""
+  fi
+}
+
+# 3) Патч десинка TLS reasm — замена bin nfqws2
+patch_nfqws2_tls_reasm() {
+  local bin_dir bin_path url tmp init="/opt/etc/init.d/S51nfqws2"
+
+  echo
+  info "Патч десинка TLS reasm (замена bin nfqws2)"
+  info "Релиз: $NFQWS2_REASM_TAG"
+  info "Источник: https://github.com/MarkinAlexander/zapret2-keenetic-binaries"
+
+  if ! is_installed "nfqws2-keenetic"; then
+    error "Пункт доступен только при установленном nfqws2-keenetic."
+    info "Сначала установите NFQWS2 (пункт 2 в этом меню)."
+    return 1
+  fi
+
+  [ -z "$ARCH" ] && detect_arch
+  bin_dir=$(nfqws2_reasm_bin_dir)
+  if [ -z "$bin_dir" ]; then
+    error "Не удалось сопоставить архитектуру ($ARCH / $ARCH_RAW) с каталогом патча."
+    return 1
+  fi
+  info "Архитектура патча: $bin_dir"
+
+  bin_path=$(nfqws2_bin_path)
+  if [ -z "$bin_path" ] || [ ! -f "$bin_path" ]; then
+    error "Локальный nfqws2 не найден (/opt/usr/bin/nfqws2, /opt/bin/nfqws2)."
+    return 1
+  fi
+  info "Локальный bin: $bin_path"
+
+  url="${NFQWS2_REASM_BASE}/${bin_dir}/nfqws2"
+  tmp="/tmp/nfqws2-reasm-$$"
+  info "Скачивание: $url"
+  if ! download_file "$url" "$tmp"; then
+    error "Не удалось скачать патченный nfqws2."
+    rm -f "$tmp"
+    return 1
+  fi
+  if [ ! -s "$tmp" ]; then
+    error "Скачанный файл пуст."
+    rm -f "$tmp"
+    return 1
+  fi
+  # минимальная sanity-проверка: не HTML-страница ошибки
+  if head -c 20 "$tmp" 2>/dev/null | grep -q '<!DOCTYPE\|<html'; then
+    error "Вместо бинарника получена HTML-страница (проверьте URL/arch)."
+    rm -f "$tmp"
+    return 1
+  fi
+
+  info "Остановка nfqws2..."
+  if [ -x "$init" ]; then
+    "$init" stop 2>/dev/null || true
+  else
+    killall nfqws2 2>/dev/null || true
+  fi
+  sleep 1
+
+  backup_file "$bin_path"
+  if ! cp -f "$tmp" "$bin_path"; then
+    error "Не удалось заменить $bin_path"
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod +x "$bin_path" 2>/dev/null || true
+  rm -f "$tmp"
+  info "Бинарник заменён: $bin_path"
+
+  info "Запуск nfqws2..."
+  if [ -x "$init" ]; then
+    "$init" start 2>/dev/null || "$init" restart 2>/dev/null || true
+  fi
+  sleep 1
+  refresh_proc_cache
+  if proc_running nfqws2 || service_is_up nfqws2; then
+    info "nfqws2 запущен (патч TLS reasm применён)."
+  else
+    warn "Сервис nfqws2 не обнаружен в процессах — проверьте вручную: $init start"
+  fi
+}
+
 menu_install_nfqws() {
   echo
   printf '%s\n' "${BOLD}Выберите версию для установки:${NC}"
   echo "  1) nfqws-keenetic  (версия 1)"
   echo "  2) nfqws2-keenetic (версия 2)"
+  if is_installed "nfqws2-keenetic"; then
+    echo "  3) патч десинка TLS reasm  (замена bin nfqws2)"
+  else
+    printf '  %s3) патч десинка TLS reasm  (нужен nfqws2)%s\n' "$DIM" "$NC"
+  fi
   echo "  0) Назад"
-  ask "Ваш выбор [1/2/0]: "
-  read -r choice
+  ask "Ваш выбор [1/2/3/0]: "
+  read_menu choice
   case "$choice" in
     1) install_nfqws1 ;;
     2) install_nfqws2 ;;
+    3) patch_nfqws2_tls_reasm ;;
     0|"") return ;;
     *) warn "Неверный выбор" ;;
   esac
@@ -3022,14 +3194,21 @@ menu_keenkit() {
   echo
   info "Запуск установщика..."
   if command -v curl >/dev/null 2>&1; then
-    curl -L -s "$KEENKIT_INSTALL_URL" > /tmp/keenkit-install.sh && sh /tmp/keenkit-install.sh
+    curl -L -s "$KEENKIT_INSTALL_URL" > /tmp/keenkit-install.sh || return 1
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO /tmp/keenkit-install.sh "$KEENKIT_INSTALL_URL" && sh /tmp/keenkit-install.sh
+    wget -qO /tmp/keenkit-install.sh "$KEENKIT_INSTALL_URL" || return 1
   else
     error "Нужны curl или wget."
     return 1
   fi
+  if [ -c /dev/tty ]; then
+    sh /tmp/keenkit-install.sh < /dev/tty > /dev/tty 2>&1 || true
+  else
+    sh /tmp/keenkit-install.sh || true
+  fi
   rm -f /tmp/keenkit-install.sh 2>/dev/null || true
+  drain_stdin
+  tty_setup
   info "Установщик KeenKit завершил работу."
 }
 
@@ -3211,7 +3390,13 @@ install_telemt() {
     error "Нужны curl или wget."
     return 1
   fi
-  sh /opt/tmp/install_telemt.sh
+  if [ -c /dev/tty ]; then
+    sh /opt/tmp/install_telemt.sh < /dev/tty > /dev/tty 2>&1 || true
+  else
+    sh /opt/tmp/install_telemt.sh || true
+  fi
+  drain_stdin
+  tty_setup
   info "Установщик telemt завершил работу."
 }
 
@@ -3229,7 +3414,13 @@ install_telemt_panel() {
     error "Нужны curl или wget."
     return 1
   fi
-  sh /opt/tmp/install_telemt-panel.sh
+  if [ -c /dev/tty ]; then
+    sh /opt/tmp/install_telemt-panel.sh < /dev/tty > /dev/tty 2>&1 || true
+  else
+    sh /opt/tmp/install_telemt-panel.sh || true
+  fi
+  drain_stdin
+  tty_setup
   info "Установщик telemt-panel завершил работу."
 }
 
@@ -3307,7 +3498,7 @@ menu_telemt() {
     echo "  0. Назад"
     echo
     ask "Выбор: "
-    read -r tchoice
+    read_menu tchoice
     case "$tchoice" in
       1) install_telemt || true ;;
       2) install_telemt_panel || true ;;
@@ -3322,9 +3513,10 @@ menu_telemt() {
       0|"") return 0 ;;
       *) warn "Неверный пункт" ;;
     esac
+    drain_stdin
     echo
     ask "$LBL_BACK"
-    read -r _
+    read_menu _
   done
 }
 
@@ -3976,6 +4168,7 @@ menu_service() {
 # Главное меню
 # ---------------------------------------------------------------------------
 main_menu() {
+  tty_setup
   while true; do
     clear 2>/dev/null || true
     echo
@@ -4015,7 +4208,7 @@ main_menu() {
     echo "      00. $LBL_00"
     echo
     ask "$LBL_PROMPT"
-    read -r choice
+    read_menu choice
 
     # || true — при set -e любой return 1 из пункта не должен завершать скрипт
     case "$choice" in
@@ -4047,9 +4240,11 @@ main_menu() {
       *) warn "Invalid menu item" ;;
     esac
 
+    # После внешних установщиков stdin часто «грязный» — чистим перед паузой
+    drain_stdin
     echo
     ask "$LBL_BACK"
-    read -r _
+    read_menu _
   done
 }
 
