@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.51"
+SCRIPT_VERSION="0.6.52"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -1864,7 +1864,7 @@ DOT_DOH_STRATEGY='               #DNS
                --payload=tls_client_hello
                --lua-desync=circular:fails=2:time=60:retrans=3:nld=2
                --lua-desync=multisplit:pos=sniext+2:seqovl=3:padencap
-               --lua-desync=fake:blob=fake_default_tls:optional:tcp_seq=-10000:tcp_ack=-66000:badsum:tls_mod=rnd,dupsid,sni=rzd.ru:repeats=2
+               --lua-desync=fake:blob=fake_default_tls:optional:tcp_seq=-10000:tcp_ack=-66000:badsum:tls_mod=rnd,dupsid,sni=rzd.ru:repeat=2
                --new
                --filter-udp=853 --filter-l7=quic
                --hostlist-domains=dns.adguard-dns.com,dns.nextdns.io
@@ -3019,6 +3019,21 @@ menu_keenkit() {
   info "Установщик KeenKit завершил работу."
 }
 
+# Feedly opkg-архитектура для tg-ws-proxy (spatiumstas/feedly)
+# aarch64-3.10 | armv7-3.2 | mips-3.4 | mipsel-3.4
+feedly_arch() {
+  local raw
+  raw=$(opkg print-architecture 2>/dev/null | sort -k3 -nr | awk '$2!="all"{print $2;exit}')
+  case "$raw" in
+    aarch64-3.10|armv7-3.2|mips-3.4|mipsel-3.4) echo "$raw" ;;
+    aarch64*|arm64*) echo "aarch64-3.10" ;;
+    armv7*|arm*)     echo "armv7-3.2" ;;
+    mipsel*)         echo "mipsel-3.4" ;;
+    mips*)           echo "mips-3.4" ;;
+    *)               echo "" ;;
+  esac
+}
+
 menu_tg_ws_proxy() {
   echo
   info "TG WS Proxy Go (tg-ws-proxy)"
@@ -3026,9 +3041,33 @@ menu_tg_ws_proxy() {
     opkg_install_or_upgrade tg-ws-proxy
   else
     info "Пакет не установлен — установка..."
-    run_remote_sh "https://raw.githubusercontent.com/spatiumstas/feedly/main/add-repo.sh" || return 1
-    opkg install tg-ws-proxy
-    info "Установка завершена."
+    local farch
+    farch=$(feedly_arch)
+    if [ -z "$farch" ]; then
+      error "Неподдерживаемая архитектура для tg-ws-proxy (нужны: aarch64-3.10, armv7-3.2, mips-3.4, mipsel-3.4)."
+      error "Определено: $(opkg print-architecture 2>/dev/null | tr '\n' ' ')"
+      return 1
+    fi
+    info "Архитектура feedly: $farch"
+    # Репозиторий spatiumstas/feedly (тот же, что add-repo.sh)
+    ensure_opkg_repo "feedly_${farch}" "https://spatiumstas.github.io/feedly/${farch}" || {
+      error "Не удалось добавить репозиторий feedly. Проверьте доступ к github.io (DPI?)."
+      return 1
+    }
+    if ! opkg install tg-ws-proxy; then
+      error "opkg install tg-ws-proxy не удался."
+      warn "Проверьте: opkg update && opkg list | grep tg-ws"
+      warn "Или установите вручную IPK из https://github.com/spatiumstas/tg-ws-proxy-go/releases"
+      warn "  (файл вида tg-ws-proxy_*-entware_${farch}.ipk)"
+      return 1
+    fi
+    refresh_opkg_cache
+    if is_installed "tg-ws-proxy"; then
+      info "Установка завершена: $(pkg_version tg-ws-proxy)"
+    else
+      error "Пакет после установки не найден в opkg list-installed."
+      return 1
+    fi
   fi
   echo
   printf '%s\n' "${BOLD}Дополнительная информация:${NC}"
