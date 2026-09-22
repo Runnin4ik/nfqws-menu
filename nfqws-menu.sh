@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.54"
+SCRIPT_VERSION="0.6.55"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -106,6 +106,7 @@ ui_apply_lang() {
       LBL_S="Сервисные утилиты"
       LBL_S1="Сжать bin/sbin (UPX)"
       LBL_S2="Dropbear fix"
+      LBL_U="Обновить все пакеты"
       LBL_1="Установить NFQWS/NFQWS2"
       LBL_2="Установить веб-интерфейс"
       LBL_3="Выбор стратегии"
@@ -139,6 +140,7 @@ ui_apply_lang() {
       LBL_S="Service utilities"
       LBL_S1="Compress bin/sbin (UPX)"
       LBL_S2="Dropbear fix"
+      LBL_U="Upgrade all packages"
       LBL_1="Install NFQWS/NFQWS2"
       LBL_2="Install web UI"
       LBL_3="Select strategy"
@@ -3865,8 +3867,24 @@ menu_remove() {
 }
 
 # ---------------------------------------------------------------------------
-# Сервисные утилиты (S)
+# Сервисные утилиты (S / U)
 # ---------------------------------------------------------------------------
+opkg_upgrade_all() {
+  echo
+  info "$LBL_U"
+  info "opkg update && opkg upgrade ..."
+  if ! opkg update; then
+    error "opkg update не удался."
+    return 1
+  fi
+  if ! opkg upgrade; then
+    error "opkg upgrade не удался."
+    return 1
+  fi
+  refresh_opkg_cache
+  info "Обновление пакетов завершено."
+}
+
 service_upx_compress() {
   echo
   info "$LBL_S1"
@@ -3939,13 +3957,15 @@ menu_service() {
     printf '%s\n' "${BOLD}${CYAN}[::]  ${LBL_REMOVE} (S)${NC}"
     echo "      1. $LBL_S1"
     echo "      2. $LBL_S2"
+    echo "      U. $LBL_U"
     echo "      0. Назад / Back"
     echo
-    ask "Выбор [1/2/0]: "
+    ask "Выбор [1/2/U/0]: "
     read -r schoice
     case "$schoice" in
       1) service_upx_compress || true ;;
       2) service_dropbear_fix || true ;;
+      U|u) opkg_upgrade_all || true ;;
       0|"") return 0 ;;
       *) warn "Неверный выбор." ;;
     esac
@@ -4016,6 +4036,7 @@ main_menu() {
       15) menu_magitrickle || true ;;
       16) menu_telemt || true ;;
       S|s) menu_service || true ;;
+      U|u) opkg_upgrade_all || true ;;
       77) menu_change_language; continue ;;
       88) menu_remove || true ;;
       99) update_self || true ;;
