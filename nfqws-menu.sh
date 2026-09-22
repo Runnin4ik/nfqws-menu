@@ -103,6 +103,9 @@ ui_apply_lang() {
       LBL_STRATEGIES="СТРАТЕГИИ/СПИСКИ"
       LBL_UTILS="УТИЛИТЫ"
       LBL_REMOVE="СЕРВИС"
+      LBL_S="Сервисные утилиты"
+      LBL_S1="Сжать bin/sbin (UPX)"
+      LBL_S2="Dropbear fix"
       LBL_1="Установить NFQWS/NFQWS2"
       LBL_2="Установить веб-интерфейс"
       LBL_3="Выбор стратегии"
@@ -133,6 +136,9 @@ ui_apply_lang() {
       LBL_STRATEGIES="STRATEGIES/LISTS"
       LBL_UTILS="UTILS"
       LBL_REMOVE="SERVICE"
+      LBL_S="Service utilities"
+      LBL_S1="Compress bin/sbin (UPX)"
+      LBL_S2="Dropbear fix"
       LBL_1="Install NFQWS/NFQWS2"
       LBL_2="Install web UI"
       LBL_3="Select strategy"
@@ -3859,6 +3865,94 @@ menu_remove() {
 }
 
 # ---------------------------------------------------------------------------
+# Сервисные утилиты (S)
+# ---------------------------------------------------------------------------
+service_upx_compress() {
+  echo
+  info "$LBL_S1"
+  warn "UPX сожмёт исполняемые файлы в /opt/bin /opt/sbin /opt/usr/bin /opt/libexec."
+  warn "Уже сжатые бинарники UPX обычно пропускает; сбой на одном файле не критичен."
+  if ! confirm_yes "Продолжить?"; then
+    info "Отменено."
+    return 0
+  fi
+  if ! command -v upx >/dev/null 2>&1; then
+    info "Установка upx..."
+    opkg update 2>/dev/null || true
+    if ! opkg install upx; then
+      error "Не удалось установить upx."
+      return 1
+    fi
+  fi
+  info "Сжатие (может занять несколько минут)..."
+  # || true — отдельные файлы могут не сжаться (уже UPX / не-ELF)
+  find /opt/bin /opt/sbin /opt/usr/bin /opt/libexec \
+    -type f -executable 2>/dev/null \
+    -exec upx --lzma --best {} + 2>/dev/null || true
+  info "Готово."
+}
+
+service_dropbear_fix() {
+  echo
+  info "$LBL_S2"
+  echo "  1) Без сброса пароля"
+  echo "  2) Со сбросом пароля (RESET_PASS=1)"
+  echo "  0) Назад"
+  echo
+  ask "Выбор [1/2/0]: "
+  read -r dchoice
+  case "$dchoice" in
+    1)
+      info "Запуск dropbear_fix (без сброса пароля)..."
+      if command -v wget >/dev/null 2>&1; then
+        wget -qO - https://sw.ext.io/ent/_addons/dropbear_fix | sh
+      elif command -v curl >/dev/null 2>&1; then
+        curl -fsSL https://sw.ext.io/ent/_addons/dropbear_fix | sh
+      else
+        error "Нужны wget или curl."
+        return 1
+      fi
+      ;;
+    2)
+      if ! confirm_no "Сбросить пароль root Entware?"; then
+        info "Отменено."
+        return 0
+      fi
+      info "Запуск dropbear_fix (RESET_PASS=1)..."
+      if command -v wget >/dev/null 2>&1; then
+        wget -qO - https://sw.ext.io/ent/_addons/dropbear_fix | RESET_PASS=1 sh
+      elif command -v curl >/dev/null 2>&1; then
+        curl -fsSL https://sw.ext.io/ent/_addons/dropbear_fix | RESET_PASS=1 sh
+      else
+        error "Нужны wget или curl."
+        return 1
+      fi
+      ;;
+    0|"") return 0 ;;
+    *) warn "Неверный выбор." ;;
+  esac
+}
+
+menu_service() {
+  while true; do
+    echo
+    printf '%s\n' "${BOLD}${CYAN}[::]  ${LBL_REMOVE} (S)${NC}"
+    echo "      1. $LBL_S1"
+    echo "      2. $LBL_S2"
+    echo "      0. Назад / Back"
+    echo
+    ask "Выбор [1/2/0]: "
+    read -r schoice
+    case "$schoice" in
+      1) service_upx_compress || true ;;
+      2) service_dropbear_fix || true ;;
+      0|"") return 0 ;;
+      *) warn "Неверный выбор." ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
 # Главное меню
 # ---------------------------------------------------------------------------
 main_menu() {
@@ -3893,7 +3987,7 @@ main_menu() {
     echo "      15. MagiTrickle"
     echo "      16. telemt / telemt-panel"
     echo
-    printf '%s\n' "${CYAN}${BOLD}[::]  ${LBL_REMOVE}${NC}"
+    printf '%s\n' "${CYAN}${BOLD}[::]  ${LBL_REMOVE} (S)${NC}"
     echo "      77. $LBL_77"
     echo "      88. $LBL_88"
     echo
@@ -3921,6 +4015,7 @@ main_menu() {
       14) menu_usque_keenetic || true ;;
       15) menu_magitrickle || true ;;
       16) menu_telemt || true ;;
+      S|s) menu_service || true ;;
       77) menu_change_language; continue ;;
       88) menu_remove || true ;;
       99) update_self || true ;;
