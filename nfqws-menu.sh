@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.52"
+SCRIPT_VERSION="0.6.53"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -2961,7 +2961,6 @@ menu_dpi_detector() {
   fi
   info "Источник: $DPI_DETECTOR_INSTALL_URL"
   echo
-  confirm_yes "Установить dpi-detector?" || { info "Отменено."; return 0; }
   info "Запуск установщика..."
   run_remote_sh "$DPI_DETECTOR_INSTALL_URL" || return 1
   echo
@@ -2985,7 +2984,6 @@ menu_awg_manager() {
   info "awg-manager — установка через awg-compressed"
   info "Источник: $AWG_MANAGER_INSTALL_URL"
   echo
-  confirm_yes "Запустить установщик awg-manager?" || { info "Отменено."; return 0; }
   info "Запуск установщика..."
   run_remote_sh "$AWG_MANAGER_INSTALL_URL" || return 1
   info "Установщик awg-manager завершил работу."
@@ -3005,7 +3003,6 @@ menu_keenkit() {
   info "KeenKit — установка"
   info "Источник: $KEENKIT_INSTALL_URL"
   echo
-  confirm_yes "Запустить установщик KeenKit?" || { info "Отменено."; return 0; }
   info "Запуск установщика..."
   if command -v curl >/dev/null 2>&1; then
     curl -L -s "$KEENKIT_INSTALL_URL" > /tmp/keenkit-install.sh && sh /tmp/keenkit-install.sh
