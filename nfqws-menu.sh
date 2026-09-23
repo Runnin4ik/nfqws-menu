@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.58"
+SCRIPT_VERSION="0.6.60"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -184,26 +184,10 @@ ask()   { printf '%s' "${CYAN}[?]${NC} $*"; }
 # Общие хелперы
 # ---------------------------------------------------------------------------
 
-# Настройка терминала: канонический ввод + Backspace=^H (иначе печатается «^H»).
-# stty без < /dev/tty трогает не тот fd, если stdin уже не tty.
-tty_setup() {
-  [ -c /dev/tty ] || return 0
-  stty sane < /dev/tty 2>/dev/null || true
-  stty icanon echo < /dev/tty 2>/dev/null || true
-  # Большинство SSH/клиентов на Keenetic шлют BS (ASCII 8 = ^H), а не DEL (^?)
-  stty erase '^H' < /dev/tty 2>/dev/null || \
-    stty erase "$(printf '\010')" < /dev/tty 2>/dev/null || true
-}
-
-# Чтение с реального терминала (не из «хвоста» stdin после curl|sh / установщиков).
+# Обычный read (без stty и без /dev/tty — иначе ломается Backspace у SSH-клиентов).
 # Использование: read_menu varname
 read_menu() {
-  local _rm_var="$1"
-  if [ -c /dev/tty ]; then
-    read -r "$_rm_var" < /dev/tty
-  else
-    read -r "$_rm_var"
-  fi
+  read -r "$1"
 }
 
 # Сбросить буфер stdin, чтобы «Enter» от установщика не проглатывал следующий read.
@@ -557,7 +541,6 @@ run_remote_sh() {
   fi
   rm -f "$tmp"
   drain_stdin
-  tty_setup
   return "$rc"
 }
 
@@ -3208,7 +3191,6 @@ menu_keenkit() {
   fi
   rm -f /tmp/keenkit-install.sh 2>/dev/null || true
   drain_stdin
-  tty_setup
   info "Установщик KeenKit завершил работу."
 }
 
@@ -3396,7 +3378,6 @@ install_telemt() {
     sh /opt/tmp/install_telemt.sh || true
   fi
   drain_stdin
-  tty_setup
   info "Установщик telemt завершил работу."
 }
 
@@ -3420,7 +3401,6 @@ install_telemt_panel() {
     sh /opt/tmp/install_telemt-panel.sh || true
   fi
   drain_stdin
-  tty_setup
   info "Установщик telemt-panel завершил работу."
 }
 
@@ -4168,7 +4148,6 @@ menu_service() {
 # Главное меню
 # ---------------------------------------------------------------------------
 main_menu() {
-  tty_setup
   while true; do
     clear 2>/dev/null || true
     echo
