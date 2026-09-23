@@ -75,10 +75,11 @@ cloudflarestream.com
 cloudflaretest.com
 cloudfront.net
 
-#twilio.com
-#verisign.com
-#akamaized.net
+twilio.com
+verisign.com
+akamaized.net
 amazonaws.com
+akamaiedge.net
 
 #edgecastcdn.net
 #footprint.net
@@ -329,6 +330,7 @@ frankerfacez.com
 localizeapi.com
 
 fastpic.org
+hostingkartinok.com
 
 euw1-device-cloudgateway.iot.i.tplinknbu.com
 security.iot.i.tplinknbu.com
