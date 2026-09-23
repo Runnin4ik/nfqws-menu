@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.64"
+SCRIPT_VERSION="0.6.65"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -4097,19 +4097,19 @@ download_https_file() {
   return 1
 }
 
-# dropbear_fix останавливает Entware-dropbear → текущая SSH-сессия умрёт.
-# Нельзя curl|sh: при обрыве сессии скрипт не доходит до _start → dropbear мёртв.
-# Скачиваем в файл и запускаем в фоне, отвязав от tty/SSH.
+# dropbear_fix (логика sw.ext.io): правки conf/init + restart Entware dropbear.
+# Важно: stop убивает текущую SSH-сессию. Обычный фон (…&) получает SIGHUP и
+# часто не доходит до start. Делаем conf-правки сейчас, restart — через nohup/trap HUP.
 service_dropbear_fix() {
-  local url="https://sw.ext.io/ent/_addons/dropbear_fix"
-  local tmp="/tmp/dropbear_fix.sh"
+  local conf="/opt/etc/config/dropbear.conf"
+  local init="/opt/etc/init.d/S51dropbear"
   local log="/tmp/dropbear_fix.log"
-  local reset=0
+  local reset=0 port="" bin=""
 
   echo
   info "$LBL_S2"
   echo "  1) Без сброса пароля"
-  echo "  2) Со сбросом пароля (RESET_PASS=1)"
+  echo "  2) Со сбросом пароля (root → keenetic)"
   echo "  0) Назад"
   echo
   ask "Выбор [1/2/0]: "
@@ -4127,30 +4127,78 @@ service_dropbear_fix() {
     *) warn "Неверный выбор."; return 0 ;;
   esac
 
-  echo
-  warn "Скрипт перезапустит Entware dropbear — эта SSH-сессия оборвётся."
-  warn "Если в конфиге был PORT=22, станет PORT=222."
-  warn "Подождите 5–10 сек и подключитесь снова (порт 222 или 22)."
-  echo
-  info "Скачивание dropbear_fix..."
-  if ! download_https_file "$url" "$tmp"; then
-    error "Не удалось скачать: $url"
-    error "Нужен curl или wget с HTTPS (opkg install ca-certificates curl)."
+  if [ ! -x "$init" ] && [ ! -f "$init" ]; then
+    error "Не найден $init — Entware dropbear не установлен?"
     return 1
   fi
-  chmod +x "$tmp" 2>/dev/null || true
-
-  info "Запуск в фоне (лог: $log)..."
-  # sleep 1 — успеть вывести сообщения; </dev/null — не держать SSH-канал
-  if [ "$reset" = "1" ]; then
-    ( sleep 1; RESET_PASS=1 sh "$tmp" ) </dev/null >"$log" 2>&1 &
-  else
-    ( sleep 1; sh "$tmp" ) </dev/null >"$log" 2>&1 &
+  if [ ! -f "$conf" ]; then
+    error "Не найден $conf"
+    return 1
   fi
-  info "PID $!. Сессия сейчас может оборваться — это нормально."
-  info "После переподключения при необходимости: cat $log"
-  # Даем фону стартовать; дальше SSH, скорее всего, умрёт на _stop
-  sleep 2
+
+  # --- правки конфига, пока SSH ещё жив ---
+  if grep -q '^PORT=22$' "$conf" 2>/dev/null; then
+    sed -i 's/^PORT=22$/PORT=222/' "$conf"
+    info "PORT: 22 → 222"
+  fi
+  if grep -q 'PIDFILE="/opt/var/run/dropbear.pid"' "$init" 2>/dev/null; then
+    sed -i 's|PIDFILE="/opt/var/run/dropbear.pid"|PIDFILE="/var/run/dropbear.pid"|g' "$init"
+    info "PIDFILE → /var/run/dropbear.pid"
+  fi
+  if [ "$reset" = "1" ] && [ -f /opt/etc/passwd ]; then
+    # стандартный hash keenetic (как в sw.ext.io dropbear_fix)
+    sed -i 's#^\(root:\)[^:]*#\1$1$6vKOV7zs$d2EqNYGvlBWEYoFD7FFkr0#' /opt/etc/passwd
+    info "Пароль root Entware сброшен на: keenetic"
+  fi
+
+  port=$(grep -E '^PORT=' "$conf" 2>/dev/null | head -1 | cut -d= -f2)
+  [ -z "$port" ] && port="?"
+  bin="/opt/sbin/dropbear"
+  [ -x "$bin" ] || bin="dropbear"
+
+  echo
+  warn "Сейчас будет перезапуск Entware dropbear — SSH-сессия оборвётся."
+  warn "Подключайтесь через 5–10 сек:"
+  warn "  ssh -p $port root@<IP-роутера>"
+  [ "$reset" = "1" ] && warn "  пароль: keenetic"
+  echo
+  info "Планирую restart в фоне (лог: $log)..."
+
+  # Полная отвязка от SSH-сессии (SIGHUP не должен убить restart)
+  rm -f "$log"
+  if command -v nohup >/dev/null 2>&1; then
+    nohup sh -c "
+      trap '' HUP
+      sleep 2
+      echo \"[\$(date)] stop\" >>'$log'
+      '$init' stop >>'$log' 2>&1 || true
+      killall -9 dropbear >>'$log' 2>&1 || true
+      killall -9 /opt/sbin/dropbear >>'$log' 2>&1 || true
+      rm -f /opt/var/run/dropbear.pid /var/run/dropbear.pid
+      sleep 1
+      echo \"[\$(date)] start\" >>'$log'
+      '$init' start >>'$log' 2>&1 || '$bin' -p '$port' >>'$log' 2>&1 || true
+      sleep 1
+      echo \"[\$(date)] status\" >>'$log'
+      '$init' status >>'$log' 2>&1 || true
+      busybox ps 2>/dev/null | grep dropbear | grep -v grep >>'$log' || ps w 2>/dev/null | grep dropbear | grep -v grep >>'$log' || true
+      echo \"[\$(date)] done port=$port\" >>'$log'
+    " </dev/null >>"$log" 2>&1 &
+  else
+    (
+      trap '' HUP
+      sleep 2
+      "$init" stop 2>/dev/null || true
+      killall -9 dropbear 2>/dev/null || true
+      rm -f /opt/var/run/dropbear.pid /var/run/dropbear.pid
+      sleep 1
+      "$init" start 2>/dev/null || "$bin" -p "$port" 2>/dev/null || true
+    ) </dev/null >>"$log" 2>&1 &
+  fi
+
+  info "PID $!. Ждите обрыва сессии, затем: ssh -p $port root@IP"
+  # Держим процесс меню пару секунд, чтобы nohup успел отцепиться
+  sleep 3
   return 0
 }
 
