@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.61"
+SCRIPT_VERSION="0.6.62"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -4170,7 +4170,6 @@ menu_opera_hidden() {
     sh "$dest" || true
   fi
   drain_stdin
-  tty_setup
 }
 
 # ---------------------------------------------------------------------------
