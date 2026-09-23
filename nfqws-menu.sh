@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.62"
+SCRIPT_VERSION="0.6.63"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -4082,6 +4082,28 @@ service_upx_compress() {
   info "Готово."
 }
 
+# Запуск remote-скрипта по HTTPS: curl предпочтительнее (busybox/wget-nossl
+# часто не умеет https → «not an http or ftp url»).
+run_https_sh() {
+  local url="$1"
+  shift
+  # "$@" — env перед sh, напр. RESET_PASS=1
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsSL "$url" 2>/dev/null | env "$@" sh; then
+      return 0
+    fi
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    # wget-ssl / GNU wget; wget-nossl на https упадёт — тогда ошибка ниже
+    if wget -qO - "$url" 2>/dev/null | env "$@" sh; then
+      return 0
+    fi
+  fi
+  error "Не удалось скачать/запустить: $url"
+  error "Нужен curl или wget с HTTPS (opkg install ca-certificates curl  или  wget-ssl)."
+  return 1
+}
+
 service_dropbear_fix() {
   echo
   info "$LBL_S2"
@@ -4090,18 +4112,11 @@ service_dropbear_fix() {
   echo "  0) Назад"
   echo
   ask "Выбор [1/2/0]: "
-  read -r dchoice
+  read_menu dchoice
   case "$dchoice" in
     1)
       info "Запуск dropbear_fix (без сброса пароля)..."
-      if command -v wget >/dev/null 2>&1; then
-        wget -qO - https://sw.ext.io/ent/_addons/dropbear_fix | sh
-      elif command -v curl >/dev/null 2>&1; then
-        curl -fsSL https://sw.ext.io/ent/_addons/dropbear_fix | sh
-      else
-        error "Нужны wget или curl."
-        return 1
-      fi
+      run_https_sh "https://sw.ext.io/ent/_addons/dropbear_fix" || return 1
       ;;
     2)
       if ! confirm_no "Сбросить пароль root Entware?"; then
@@ -4109,14 +4124,7 @@ service_dropbear_fix() {
         return 0
       fi
       info "Запуск dropbear_fix (RESET_PASS=1)..."
-      if command -v wget >/dev/null 2>&1; then
-        wget -qO - https://sw.ext.io/ent/_addons/dropbear_fix | RESET_PASS=1 sh
-      elif command -v curl >/dev/null 2>&1; then
-        curl -fsSL https://sw.ext.io/ent/_addons/dropbear_fix | RESET_PASS=1 sh
-      else
-        error "Нужны wget или curl."
-        return 1
-      fi
+      run_https_sh "https://sw.ext.io/ent/_addons/dropbear_fix" RESET_PASS=1 || return 1
       ;;
     0|"") return 0 ;;
     *) warn "Неверный выбор." ;;
