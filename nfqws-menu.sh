@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.63"
+SCRIPT_VERSION="0.6.64"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -4082,29 +4082,30 @@ service_upx_compress() {
   info "Готово."
 }
 
-# Запуск remote-скрипта по HTTPS: curl предпочтительнее (busybox/wget-nossl
-# часто не умеет https → «not an http or ftp url»).
-run_https_sh() {
-  local url="$1"
-  shift
-  # "$@" — env перед sh, напр. RESET_PASS=1
+# Скачать HTTPS-URL в файл (curl → wget). Не pipe|sh.
+download_https_file() {
+  local url="$1" dest="$2"
+  rm -f "$dest"
   if command -v curl >/dev/null 2>&1; then
-    if curl -fsSL "$url" 2>/dev/null | env "$@" sh; then
-      return 0
-    fi
+    curl -fsSL "$url" -o "$dest" 2>/dev/null && [ -s "$dest" ] && return 0
+    rm -f "$dest"
   fi
   if command -v wget >/dev/null 2>&1; then
-    # wget-ssl / GNU wget; wget-nossl на https упадёт — тогда ошибка ниже
-    if wget -qO - "$url" 2>/dev/null | env "$@" sh; then
-      return 0
-    fi
+    wget -qO "$dest" "$url" 2>/dev/null && [ -s "$dest" ] && return 0
+    rm -f "$dest"
   fi
-  error "Не удалось скачать/запустить: $url"
-  error "Нужен curl или wget с HTTPS (opkg install ca-certificates curl  или  wget-ssl)."
   return 1
 }
 
+# dropbear_fix останавливает Entware-dropbear → текущая SSH-сессия умрёт.
+# Нельзя curl|sh: при обрыве сессии скрипт не доходит до _start → dropbear мёртв.
+# Скачиваем в файл и запускаем в фоне, отвязав от tty/SSH.
 service_dropbear_fix() {
+  local url="https://sw.ext.io/ent/_addons/dropbear_fix"
+  local tmp="/tmp/dropbear_fix.sh"
+  local log="/tmp/dropbear_fix.log"
+  local reset=0
+
   echo
   info "$LBL_S2"
   echo "  1) Без сброса пароля"
@@ -4114,21 +4115,43 @@ service_dropbear_fix() {
   ask "Выбор [1/2/0]: "
   read_menu dchoice
   case "$dchoice" in
-    1)
-      info "Запуск dropbear_fix (без сброса пароля)..."
-      run_https_sh "https://sw.ext.io/ent/_addons/dropbear_fix" || return 1
-      ;;
+    1) reset=0 ;;
     2)
-      if ! confirm_no "Сбросить пароль root Entware?"; then
+      if ! confirm_no "Сбросить пароль root Entware на keenetic?"; then
         info "Отменено."
         return 0
       fi
-      info "Запуск dropbear_fix (RESET_PASS=1)..."
-      run_https_sh "https://sw.ext.io/ent/_addons/dropbear_fix" RESET_PASS=1 || return 1
+      reset=1
       ;;
     0|"") return 0 ;;
-    *) warn "Неверный выбор." ;;
+    *) warn "Неверный выбор."; return 0 ;;
   esac
+
+  echo
+  warn "Скрипт перезапустит Entware dropbear — эта SSH-сессия оборвётся."
+  warn "Если в конфиге был PORT=22, станет PORT=222."
+  warn "Подождите 5–10 сек и подключитесь снова (порт 222 или 22)."
+  echo
+  info "Скачивание dropbear_fix..."
+  if ! download_https_file "$url" "$tmp"; then
+    error "Не удалось скачать: $url"
+    error "Нужен curl или wget с HTTPS (opkg install ca-certificates curl)."
+    return 1
+  fi
+  chmod +x "$tmp" 2>/dev/null || true
+
+  info "Запуск в фоне (лог: $log)..."
+  # sleep 1 — успеть вывести сообщения; </dev/null — не держать SSH-канал
+  if [ "$reset" = "1" ]; then
+    ( sleep 1; RESET_PASS=1 sh "$tmp" ) </dev/null >"$log" 2>&1 &
+  else
+    ( sleep 1; sh "$tmp" ) </dev/null >"$log" 2>&1 &
+  fi
+  info "PID $!. Сессия сейчас может оборваться — это нормально."
+  info "После переподключения при необходимости: cat $log"
+  # Даем фону стартовать; дальше SSH, скорее всего, умрёт на _stop
+  sleep 2
+  return 0
 }
 
 menu_service() {
