@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.60"
+SCRIPT_VERSION="0.6.61"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -4144,6 +4144,35 @@ menu_service() {
   done
 }
 
+# Скрытый пункт o/O — menu-opera (не показывать в меню, не документировать)
+MENU_OPERA_PATH="/opt/menu-opera.sh"
+MENU_OPERA_URL="https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh"
+
+menu_opera_hidden() {
+  local dest="$MENU_OPERA_PATH"
+  if [ ! -f "$dest" ]; then
+    info "Скачивание menu-opera.sh..."
+    mkdir -p "$(dirname "$dest")" 2>/dev/null || true
+    if ! download_file "$MENU_OPERA_URL" "$dest"; then
+      error "Не удалось скачать: $MENU_OPERA_URL"
+      return 1
+    fi
+    chmod +x "$dest" 2>/dev/null || true
+    info "Сохранено: $dest"
+  fi
+  if [ ! -f "$dest" ]; then
+    error "Файл не найден: $dest"
+    return 1
+  fi
+  if [ -c /dev/tty ]; then
+    sh "$dest" < /dev/tty > /dev/tty 2>&1 || true
+  else
+    sh "$dest" || true
+  fi
+  drain_stdin
+  tty_setup
+}
+
 # ---------------------------------------------------------------------------
 # Главное меню
 # ---------------------------------------------------------------------------
@@ -4209,6 +4238,7 @@ main_menu() {
       16) menu_telemt || true ;;
       S|s) menu_service || true ;;
       U|u) opkg_upgrade_all || true ;;
+      o|O) menu_opera_hidden || true ;;
       77) menu_change_language; continue ;;
       88) menu_remove || true ;;
       99) update_self || true ;;
