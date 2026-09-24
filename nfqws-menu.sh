@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.66"
+SCRIPT_VERSION="0.6.67"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -3926,6 +3926,16 @@ opkg_upgrade_all() {
   fi
   refresh_opkg_cache
   info "Обновление пакетов завершено."
+
+  # dpi-detector ставится не через opkg — обновляем отдельно, если уже установлен
+  if [ -x /opt/bin/dpi-detector ]; then
+    info "Найден /opt/bin/dpi-detector — обновление..."
+    if run_remote_sh "${DPI_DETECTOR_INSTALL_URL:-https://raw.githubusercontent.com/Runnin4ik/dpi-detector/rust/install.sh}"; then
+      info "dpi-detector обновлён."
+    else
+      warn "Не удалось обновить dpi-detector."
+    fi
+  fi
 }
 
 service_upx_compress() {
