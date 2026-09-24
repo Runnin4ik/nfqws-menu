@@ -4,7 +4,7 @@
 
 Репозиторий также служит хранилищем готовых **стратегий** обхода DPI, **blobs** и **lists**.
 
-- Скрипт: [`nfqws-menu.sh`](nfqws-menu.sh) (текущая версия **0.6.58**)
+- Скрипт: [`nfqws-menu.sh`](nfqws-menu.sh) (текущая версия **0.6.67**)
 - Стратегии: [`strategies/`](strategies/)
 - Hosts: [`hosts`](hosts)
 - Контрольные суммы: [`SHA256SUMS`](SHA256SUMS), [`strategies/blobs/SHA256SUMS`](strategies/blobs/SHA256SUMS)
@@ -115,7 +115,6 @@ menu
 ```
 1) nfqws-keenetic  (версия 1)
 2) nfqws2-keenetic (версия 2)
-3) патч десинка TLS reasm  (замена bin nfqws2)
 0) Назад
 ```
 
@@ -123,9 +122,7 @@ menu
 - Добавление официального opkg-репозитория под архитектуру.
 - Установка пакета; при установке v2, если уже стоит v1 — предложение удалить старый пакет.
 
-#### Патч TLS reasm (п. 1 → 3)
-
-Только при установленном **nfqws2-keenetic**. Замена бинарника `nfqws2` сборкой с фиксом TLS reasm из [MarkinAlexander/zapret2-keenetic-binaries](https://github.com/MarkinAlexander/zapret2-keenetic-binaries) (`v1.0.5.1-reasm-fix`, каталог под архитектуру `linux-*`): stop сервиса → бэкап текущего bin → замена → start.
+> Фикс TLS reasm с **NFQWS2 ≥ 1.3.1** входит в официальный пакет — отдельный патч бинарника в меню больше не нужен.
 
 ### 2. Установка веб-интерфейса
 
@@ -412,13 +409,17 @@ Telegram MTProto-прокси на Rust (полная реализация оф�
 
 ## Changelog
 
+### 0.6.59 – 0.6.67
+
+- **Ввод** — убраны `stty` / `tty_setup` и чтение меню с `/dev/tty` (ломали Backspace → печать `^?`); обычный `read`; `drain_stdin` сохранён
+- **п. 1** — убран пункт «патч десинка TLS reasm» (с NFQWS2 **≥ 1.3.1** фикс в официальном пакете)
+
 ### 0.6.50 – 0.6.58
 
-- **п. 1 → 3** — патч десинка **TLS reasm**: замена bin `nfqws2` из MarkinAlexander/zapret2-keenetic-binaries (`v1.0.5.1-reasm-fix`)
 - **п. 16** — **telemt / telemt-panel** (augin/telemt_script): install / panel / systemD-emu / remove; статус в `show_installed`
 - **S** — сервисные утилиты: UPX-сжатие bin/sbin, Dropbear fix, **U** — `opkg upgrade` всех пакетов
-- **TTY** — `tty_setup` (erase=^H), `read_menu` / `drain_stdin` из `/dev/tty`; удалённые install.sh через tmp + tty
 - **п. 10–12** — без лишнего `confirm` перед запуском установщиков dpi-detector / awg-manager / KeenKit
+- *(патч TLS reasm bin — временно в 0.6.50–0.6.65, снят в 0.6.66)*
 
 ### 0.6.47 – 0.6.49
 
@@ -500,13 +501,14 @@ Telegram MTProto-прокси на Rust (полная реализация оф�
 - **п. 7** — смена активных **fake:blob** (локальные + из репозитория)
 - **п. 8** — **Обновление hosts** через `ndmc`
 - **п. 15** — **MagiTrickle** (установка/обновление/удаление)
-- **п. 16** — **telemt / telemt-panel**; **п. 1→3** — патч TLS reasm для nfqws2
+- **п. 16** — **telemt / telemt-panel**
 - **S / U** — UPX, Dropbear fix, opkg upgrade
 - **п. 9** (бывш. 6) — Управление DoT/DoH: пресеты Xbox-DNS / NullsProxy / Supercell и др.
 - **SHA256** blobs + список стратегий из SUMS; CDN/offline-кэш; fallback через VPN-туннели
 - Нумерация: 5 = rkn.list, 6 = DoT/DoH bypass, 7 = fake:blob, 8 = hosts, 9 = Manage DoT/DoH, 16 = telemt
 - Статус: magitrickle / telemt; удаление в п. 88
 - Без принудительного `export LD_LIBRARY_PATH` (совместимость ndmc / Entware wget)
+- Обычный `read` в меню (без `stty` / принудительного erase)
 
 ### 0.5.17
 
