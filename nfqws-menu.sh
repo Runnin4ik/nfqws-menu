@@ -3247,6 +3247,18 @@ tg_ws_proxy_rs_ensure_secret() {
   return 0
 }
 
+# Бэкапы конфига копятся с каждым подбором (по одному на прогон), поэтому
+# держим последние три — так же, как инсталлер поступает со своими.
+tg_ws_proxy_rs_prune_backups() {
+  local dir="$TG_WS_PROXY_RS_CONF_DIR" keep=3 old
+  [ -d "$dir" ] || return 0
+  # shellcheck disable=SC2012 # имена однотипные: config.conf.bak.<дата>
+  for old in $(ls -1 "$dir"/config.conf.bak.* 2>/dev/null | sort -r | tail -n +$((keep + 1))); do
+    rm -f "$old"
+  done
+  return 0
+}
+
 # Проба своего слушателя появилась в 2.4.5 — у более старого бинаря её нет.
 tg_ws_proxy_rs_supports_check_listener() {
   "$TG_WS_PROXY_RS_BIN" --help 2>&1 | grep -q -- '--check-listener'
@@ -3627,6 +3639,7 @@ menu_tg_ws_proxy_rs() {
   # оставлять прокси невыверенным. Спрашиваем при повторном заходе.
   if [ "$fresh" = "1" ] || confirm_yes "Подобрать параметры и проверить?"; then
     backup_file "$TG_WS_PROXY_RS_CONF"
+    tg_ws_proxy_rs_prune_backups
     if tg_ws_proxy_rs_tune; then
       echo
       info "Связь проверена: resPQ от DC Telegram."
