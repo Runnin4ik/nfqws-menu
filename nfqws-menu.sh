@@ -3277,9 +3277,84 @@ tg_ws_proxy_rs_free_port() {
   return 1
 }
 
+# Имя релизного архива — то, что инсталлер скачает и распакует. Меню нужно оно
+# до установки, чтобы показать размер, поэтому здесь повторены и источник
+# архитектуры (opkg print-architecture), и таблица entware_binary_target из
+# install.sh. Новую архитектуру придётся добавить в обоих местах.
+tg_ws_proxy_rs_target() {
+  local arch best='' best_pri='' name pri
+  arch=$(opkg print-architecture 2>/dev/null) || return 1
+  while read -r _keyword name pri; do
+    [ -n "$name" ] || continue
+    [ "$name" = all ] && continue
+    if [ -z "$best_pri" ] || [ "$pri" -gt "$best_pri" ] 2>/dev/null; then
+      best="$name"; best_pri="$pri"
+    fi
+  done <<EOF
+$arch
+EOF
+  case "$best" in
+    aarch64|aarch64-[0-9]*) printf '%s' aarch64-unknown-linux-musl ;;
+    armv7|armv7-[0-9]*) printf '%s' armv7-unknown-linux-musleabihf ;;
+    mipsel|mipsel-[0-9]*) printf '%s' mipsel-unknown-linux-musl ;;
+    mips|mips-[0-9]*) printf '%s' mips-unknown-linux-musl ;;
+    x64|x64-[0-9]*) printf '%s' x86_64-unknown-linux-musl ;;
+    *) return 1 ;;
+  esac
+}
+
+# Размер архива: HEAD по тому же URL, что скачивает инсталлер. Пусто — значит
+# узнать не вышло (нет curl или нет сети), и размер просто не показываем.
+tg_ws_proxy_rs_asset_size() {
+  local url="https://github.com/${TG_WS_PROXY_RS_REPO}/releases/latest/download/tg-ws-proxy-$1$2.tar.gz" n
+  command -v curl >/dev/null 2>&1 || return 1
+  n=$(curl -sIL --connect-timeout 8 "$url" 2>/dev/null | awk 'BEGIN{IGNORECASE=1}/^content-length:/{v=$2}END{print v}' | tr -d ' \r\n')
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$n"
+}
+
+tg_ws_proxy_rs_mb() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  awk -v b="$1" 'BEGIN{printf "%.2f МБ", b/1048576}'
+}
+
+# Обычная сборка или компактная. Разница — флеш против ОЗУ: UPX-бинарь
+# распаковывается в память целиком, и вытеснить её ядро не может (у обычного
+# кода страницы файловые, их ядро освобождает под давлением, а на роутере нет
+# даже свопа). Поэтому по умолчанию — обычная, а компактная для тех боксов, где
+# флеша в обрез.
+tg_ws_proxy_rs_choose_variant() {
+  local target plain upx ptext utext answer
+  TG_WS_PROXY_RS_UPX=0
+  target=$(tg_ws_proxy_rs_target 2>/dev/null) || target=''
+  plain=''; upx=''
+  if [ -n "$target" ]; then
+    plain=$(tg_ws_proxy_rs_asset_size "$target" '' 2>/dev/null) || plain=''
+    upx=$(tg_ws_proxy_rs_asset_size "$target" '-upx' 2>/dev/null) || upx=''
+  fi
+  if [ -n "$plain" ]; then ptext="$(tg_ws_proxy_rs_mb "$plain") архив"; else ptext='размер неизвестен'; fi
+  if [ -n "$upx" ]; then utext="$(tg_ws_proxy_rs_mb "$upx") архив"; else utext='размер неизвестен'; fi
+  echo
+  info "Какую сборку поставить?"
+  echo "  1) Обычная — $ptext; код читается прямо с флеша, и ядро может освобождать его страницы (рекомендуется)"
+  echo "  2) Компактная (UPX) — $utext; распаковывается в ОЗУ целиком и остаётся там резидентно"
+  ask "Выбор [1/2, Enter = 1]: "
+  read_menu answer
+  case "$answer" in
+    2) TG_WS_PROXY_RS_UPX=1 ;;
+    *) TG_WS_PROXY_RS_UPX=0 ;;
+  esac
+  if [ "$TG_WS_PROXY_RS_UPX" = "1" ]; then
+    info "Компактная сборка: меньше флеша, но память под распакованный образ не освободить."
+  fi
+  return 0
+}
+
 tg_ws_proxy_rs_install() {
   local url="https://raw.githubusercontent.com/${TG_WS_PROXY_RS_REPO}/main/install.sh"
-  local script="/tmp/tgws-install.$$.sh" out rc
+  local script="/tmp/tgws-install.$$.sh" out rc upx_arg='' bin_size size_text
+  tg_ws_proxy_rs_choose_variant || return 1
+  [ "$TG_WS_PROXY_RS_UPX" = "1" ] && upx_arg='--upx'
   if ! download_file "$url" "$script"; then
     error "Не удалось скачать install.sh — проверьте доступ к GitHub."
     return 1
@@ -3291,7 +3366,7 @@ tg_ws_proxy_rs_install() {
   # Вывод показываем под отступом и без строк, которые дальше повторяет меню:
   # ссылку оно печатает само (и только после проверки связи), а «Rollback
   # backup» дублирует «Backup» тем же путём.
-  out=$(sh "$script" --platform entware 2>&1)
+  out=$(sh "$script" --platform entware $upx_arg 2>&1)
   rc=$?
   rm -f "$script"
   # Инсталлер красит вывод ANSI-кодами, поэтому сначала снимаем цвет (меню
@@ -3308,7 +3383,13 @@ tg_ws_proxy_rs_install() {
     return 1
   fi
   is_tg_ws_proxy_rs_installed || { error "Бинарь не найден: $TG_WS_PROXY_RS_BIN"; return 1; }
-  info "Установлено: $(tg_ws_proxy_rs_version)"
+  bin_size=$(wc -c < "$TG_WS_PROXY_RS_BIN" 2>/dev/null | tr -d ' \r\n') || bin_size=''
+  size_text=$(tg_ws_proxy_rs_mb "$bin_size" 2>/dev/null) || size_text=''
+  if [ -n "$size_text" ]; then
+    info "Установлено: $(tg_ws_proxy_rs_version), $size_text"
+  else
+    info "Установлено: $(tg_ws_proxy_rs_version)"
+  fi
   tg_ws_proxy_rs_disable_go_init || true
   return 0
 }
