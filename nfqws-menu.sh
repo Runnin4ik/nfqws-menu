@@ -3209,19 +3209,41 @@ tg_ws_proxy_rs_conf_set() {
   mv "$tmp" "$TG_WS_PROXY_RS_CONF"
 }
 
-# Секрет прежней Go-установки: он уже в ссылке у клиентов, и новая установка
-# не должна её менять. Делается до install.sh — тот не перезаписывает
-# существующий secret.conf.
-tg_ws_proxy_rs_adopt_secret() {
+# Секрет до установки: свой не трогаем, чужой (из Go-установки) переносим, а если
+# нет ни того ни другого — генерируем сами.
+#
+# Генерировать приходится здесь: инсталлер делает это через `od -An -tx1`, а
+# `od` в BusyBox — и в прошивке Keenetic, и в самом Entware (`/opt/bin/od` —
+# симлинк на busybox) — такого ключа не знает, и установка падает на
+# `invalid option -- 'A'`. Свой генератор берёт из /dev/urandom только
+# hex-символы: каждый отобранный символ равновероятен из шестнадцати, то есть
+# те же 128 бит, что и у инсталлера.
+tg_ws_proxy_rs_ensure_secret() {
   local s
   s=$(sed -n 's/^SECRET=["]\{0,1\}\([^"]*\)["]\{0,1\}[[:space:]]*$/\1/p' "$TG_WS_PROXY_RS_SECRET" 2>/dev/null | tr -d '\r' | head -1)
   [ -n "$s" ] && return 0
+
   s=$(sed -n 's/^SECRET=["]\{0,1\}\([^"]*\)["]\{0,1\}[[:space:]]*$/\1/p' "$TG_WS_PROXY_GO_CONF_DIR/secret.conf" 2>/dev/null | tr -d '\r' | head -1)
-  [ -n "$s" ] || return 1
+  if [ -n "$s" ]; then
+    mkdir -p "$TG_WS_PROXY_RS_CONF_DIR" || return 1
+    printf 'SECRET=%s\n' "$s" > "$TG_WS_PROXY_RS_SECRET"
+    chmod 0600 "$TG_WS_PROXY_RS_SECRET" 2>/dev/null || true
+    info "Секрет взят из Go-установки — прежние ссылки tg:// продолжат работать."
+    return 0
+  fi
+
+  s=$(tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 32)
+  case "$s" in
+    ????????????????????????????????) ;;
+    *)
+      warn "Не удалось сгенерировать секрет (/dev/urandom или tr недоступны)."
+      return 1
+      ;;
+  esac
   mkdir -p "$TG_WS_PROXY_RS_CONF_DIR" || return 1
   printf 'SECRET=%s\n' "$s" > "$TG_WS_PROXY_RS_SECRET"
   chmod 0600 "$TG_WS_PROXY_RS_SECRET" 2>/dev/null || true
-  info "Секрет взят из Go-установки — прежние ссылки tg:// продолжат работать."
+  info "Секрет сгенерирован."
   return 0
 }
 
@@ -3250,7 +3272,7 @@ tg_ws_proxy_rs_install() {
     error "Не удалось скачать install.sh — проверьте доступ к GitHub."
     return 1
   fi
-  tg_ws_proxy_rs_adopt_secret || true
+  tg_ws_proxy_rs_ensure_secret || return 1
   info "Установка из релиза…"
   # --platform entware: у установщика отдельная ветка для OpenWrt/LuCI, а на
   # Keenetic нужен путь Entware (/opt + rc.unslung).
