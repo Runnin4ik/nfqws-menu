@@ -3303,16 +3303,6 @@ EOF
   esac
 }
 
-# Размер архива: HEAD по тому же URL, что скачивает инсталлер. Пусто — значит
-# узнать не вышло (нет curl или нет сети), и размер просто не показываем.
-tg_ws_proxy_rs_asset_size() {
-  local url="https://github.com/${TG_WS_PROXY_RS_REPO}/releases/latest/download/tg-ws-proxy-$1$2.tar.gz" n
-  command -v curl >/dev/null 2>&1 || return 1
-  n=$(curl -sIL --connect-timeout 8 "$url" 2>/dev/null | awk 'BEGIN{IGNORECASE=1}/^content-length:/{v=$2}END{print v}' | tr -d ' \r\n')
-  case "$n" in ''|*[!0-9]*) return 1 ;; esac
-  printf '%s' "$n"
-}
-
 tg_ws_proxy_rs_mb() {  # $1 = байты, $2 = знаков после точки (1 или 2)
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
   # %.2f и %.1f заданы буквально: в BusyBox awk нет формы с «*».
@@ -3365,14 +3355,12 @@ tg_ws_proxy_rs_ram_size() {  # $1 = target, $2 = plain|upx
 # даже свопа). Поэтому по умолчанию — обычная, а компактная для тех боксов, где
 # флеша в обрез.
 tg_ws_proxy_rs_choose_variant() {
-  local target plain upx plain_bin upx_bin plain_ram upx_ram answer image
+  local target plain_bin upx_bin plain_ram upx_ram answer image
   local plain_flash plain_mem plain_evict upx_flash upx_mem upx_evict
   TG_WS_PROXY_RS_UPX=0
   target=$(tg_ws_proxy_rs_target 2>/dev/null) || target=''
-  plain=''; upx=''; plain_bin=''; upx_bin=''; plain_ram=''; upx_ram=''
+  plain_bin=''; upx_bin=''; plain_ram=''; upx_ram=''
   if [ -n "$target" ]; then
-    plain=$(tg_ws_proxy_rs_asset_size "$target" '' 2>/dev/null) || plain=''
-    upx=$(tg_ws_proxy_rs_asset_size "$target" '-upx' 2>/dev/null) || upx=''
     plain_bin=$(tg_ws_proxy_rs_bin_size "$target" plain 2>/dev/null) || plain_bin=''
     upx_bin=$(tg_ws_proxy_rs_bin_size "$target" upx 2>/dev/null) || upx_bin=''
     plain_ram=$(tg_ws_proxy_rs_ram_size "$target" plain 2>/dev/null) || plain_ram=''
@@ -3408,13 +3396,7 @@ tg_ws_proxy_rs_choose_variant() {
   printf '  1) Обычная          %-9s%-11s%s\n' "$plain_flash" "$plain_mem" "$plain_evict"
   printf '  2) Компактная (UPX) %-9s%-11s%s\n' "$upx_flash" "$upx_mem" "$upx_evict"
   echo
-  echo "  Флеша вдоволь — рекомендуется обычная; флеш в обрез — компактная (UPX)."
-  if [ -n "$plain_ram" ]; then
-    echo "  Память — RSS на mipsel после старта, без трафика."
-  fi
-  if [ -n "$plain" ] && [ -n "$upx" ]; then
-    echo "  Скачать: $(tg_ws_proxy_rs_mb "$plain") (обычная) / $(tg_ws_proxy_rs_mb "$upx") (UPX)."
-  fi
+  echo "  Рекомендуется обычная сборка; компактная — если флеш-памяти мало."
   ask "Выбор [1/2, Enter = 1]: "
   read_menu answer
   case "$answer" in
