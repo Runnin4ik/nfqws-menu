@@ -3365,7 +3365,8 @@ tg_ws_proxy_rs_ram_size() {  # $1 = target, $2 = plain|upx
 # даже свопа). Поэтому по умолчанию — обычная, а компактная для тех боксов, где
 # флеша в обрез.
 tg_ws_proxy_rs_choose_variant() {
-  local target plain upx plain_bin upx_bin plain_ram upx_ram ptext utext answer image
+  local target plain upx plain_bin upx_bin plain_ram upx_ram answer image
+  local plain_flash plain_mem plain_evict upx_flash upx_mem upx_evict
   TG_WS_PROXY_RS_UPX=0
   target=$(tg_ws_proxy_rs_target 2>/dev/null) || target=''
   plain=''; upx=''; plain_bin=''; upx_bin=''; plain_ram=''; upx_ram=''
@@ -3380,36 +3381,39 @@ tg_ws_proxy_rs_choose_variant() {
     [ -n "$plain_ram" ] && plain_ram=$((plain_ram * 1024))
     [ -n "$upx_ram" ] && upx_ram=$((upx_ram * 1024))
   fi
+  # Ячейки таблицы — только ASCII, а «МБ» стоит в заголовке: printf в BusyBox
+  # считает ширину в байтах, и кириллица в ячейке сломала бы выравнивание.
+  plain_flash='—'; plain_mem='—'; plain_evict='код вытесняемый'
+  upx_flash='—'; upx_mem='—'; upx_evict='образ в ОЗУ, не вытесняется'
   if [ -n "$plain_bin" ]; then
-    ptext="флеш $(tg_ws_proxy_rs_mb "$plain_bin")"
-    if [ -n "$plain_ram" ]; then
-      ptext="$ptext, память ~$(tg_ws_proxy_rs_mb "$plain_ram" 1), вытесняемая"
-    else
-      ptext="$ptext, код вытесняемый"
-    fi
-  else
-    ptext='флеш неизвестен'
+    plain_flash=$(tg_ws_proxy_rs_mb "$plain_bin"); plain_flash="${plain_flash% МБ}"
   fi
   if [ -n "$upx_bin" ]; then
-    utext="флеш $(tg_ws_proxy_rs_mb "$upx_bin")"
-    if [ -n "$upx_ram" ]; then
-      utext="$utext, память ~$(tg_ws_proxy_rs_mb "$upx_ram" 1)"
-    else
-      utext="$utext, память: образ в ОЗУ"
-    fi
-    [ -n "$plain_bin" ] && utext="$utext, до ~$(tg_ws_proxy_rs_mb "$plain_bin" 1), не вытесняется"
-  else
-    utext='флеш неизвестен'
+    upx_flash=$(tg_ws_proxy_rs_mb "$upx_bin"); upx_flash="${upx_flash% МБ}"
+  fi
+  if [ -n "$plain_ram" ]; then
+    plain_mem=$(tg_ws_proxy_rs_mb "$plain_ram" 1); plain_mem="~${plain_mem% МБ}"
+    plain_evict='1.6 МБ — код читается с флеша'
+  fi
+  if [ -n "$upx_ram" ]; then
+    upx_mem=$(tg_ws_proxy_rs_mb "$upx_ram" 1); upx_mem="~${upx_mem% МБ}+"
+    upx_evict='нет — образ распакован в ОЗУ'
+  elif [ -n "$plain_bin" ]; then
+    upx_evict="образ ≈$(tg_ws_proxy_rs_mb "$plain_bin") в ОЗУ, не вытесняется"
   fi
   echo
   info "Какую сборку поставить?"
-  echo "  1) Обычная — $ptext (рекомендуется)"
-  echo "  2) Компактная (UPX) — $utext"
+  echo
+  echo "                      флеш, МБ память, МБ вытесняемых"
+  printf '  1) Обычная          %-9s%-11s%s\n' "$plain_flash" "$plain_mem" "$plain_evict"
+  printf '  2) Компактная (UPX) %-9s%-11s%s\n' "$upx_flash" "$upx_mem" "$upx_evict"
+  echo
+  echo "  Флеша вдоволь — рекомендуется обычная; флеш в обрез — компактная (UPX)."
+  if [ -n "$plain_ram" ]; then
+    echo "  Память — RSS на mipsel после старта, без трафика."
+  fi
   if [ -n "$plain" ] && [ -n "$upx" ]; then
     echo "  Скачать: $(tg_ws_proxy_rs_mb "$plain") (обычная) / $(tg_ws_proxy_rs_mb "$upx") (UPX)."
-  fi
-  if [ -n "$plain_ram" ]; then
-    echo "  Память — RSS на mipsel после старта, без трафика; у обычной 1.6 МБ вытесняемые."
   fi
   ask "Выбор [1/2, Enter = 1]: "
   read_menu answer
