@@ -3313,9 +3313,14 @@ tg_ws_proxy_rs_asset_size() {
   printf '%s' "$n"
 }
 
-tg_ws_proxy_rs_mb() {
+tg_ws_proxy_rs_mb() {  # $1 = байты, $2 = знаков после точки (1 или 2)
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
-  awk -v b="$1" 'BEGIN{printf "%.2f МБ", b/1048576}'
+  # %.2f и %.1f заданы буквально: в BusyBox awk нет формы с «*».
+  if [ "${2:-2}" = "1" ]; then
+    awk -v b="$1" 'BEGIN{printf "%.1f МБ", b/1048576}'
+  else
+    awk -v b="$1" 'BEGIN{printf "%.2f МБ", b/1048576}'
+  fi
 }
 
 # Размер распакованного бинаря: релиз кладёт его в .tar.gz, и на флеш ложится
@@ -3339,38 +3344,73 @@ tg_ws_proxy_rs_bin_size() {
   printf '%s' "$size"
 }
 
+# Потребление памяти: RSS сразу после старта сервиса, без трафика. Замерено на
+# mipsel с релизом v2.4.5 (разброс между прогонами ±0.2 МБ). Формат:
+# <target> <обычная> <upx>, в килобайтах. Цель без строки — память покажем
+# словами, без чисел, чтобы не выдумывать чужие замеры.
+TG_WS_PROXY_RS_RAM_SIZES="
+mipsel-unknown-linux-musl 2688 3248
+"
+
+tg_ws_proxy_rs_ram_size() {  # $1 = target, $2 = plain|upx
+  local size
+  size=$(printf '%s\n' "$TG_WS_PROXY_RS_RAM_SIZES" | awk -v t="$1" -v v="$2" '$1==t{print (v=="upx")?$3:$2}')
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$size"
+}
+
 # Обычная сборка или компактная. Разница — флеш против ОЗУ: UPX-бинарь
 # распаковывается в память целиком, и вытеснить её ядро не может (у обычного
 # кода страницы файловые, их ядро освобождает под давлением, а на роутере нет
 # даже свопа). Поэтому по умолчанию — обычная, а компактная для тех боксов, где
 # флеша в обрез.
 tg_ws_proxy_rs_choose_variant() {
-  local target plain upx plain_bin upx_bin ptext utext answer image
+  local target plain upx plain_bin upx_bin plain_ram upx_ram ptext utext answer image
   TG_WS_PROXY_RS_UPX=0
   target=$(tg_ws_proxy_rs_target 2>/dev/null) || target=''
-  plain=''; upx=''; plain_bin=''; upx_bin=''
+  plain=''; upx=''; plain_bin=''; upx_bin=''; plain_ram=''; upx_ram=''
   if [ -n "$target" ]; then
     plain=$(tg_ws_proxy_rs_asset_size "$target" '' 2>/dev/null) || plain=''
     upx=$(tg_ws_proxy_rs_asset_size "$target" '-upx' 2>/dev/null) || upx=''
     plain_bin=$(tg_ws_proxy_rs_bin_size "$target" plain 2>/dev/null) || plain_bin=''
     upx_bin=$(tg_ws_proxy_rs_bin_size "$target" upx 2>/dev/null) || upx_bin=''
+    plain_ram=$(tg_ws_proxy_rs_ram_size "$target" plain 2>/dev/null) || plain_ram=''
+    upx_ram=$(tg_ws_proxy_rs_ram_size "$target" upx 2>/dev/null) || upx_ram=''
+    # Таблица в килобайтах (как /proc), форматтер ждёт байты.
+    [ -n "$plain_ram" ] && plain_ram=$((plain_ram * 1024))
+    [ -n "$upx_ram" ] && upx_ram=$((upx_ram * 1024))
   fi
-  if [ -n "$plain" ]; then
-    ptext="$(tg_ws_proxy_rs_mb "$plain") скачать"
-    [ -n "$plain_bin" ] && ptext="$ptext, $(tg_ws_proxy_rs_mb "$plain_bin") на флеше"
+  if [ -n "$plain_bin" ]; then
+    ptext="флеш $(tg_ws_proxy_rs_mb "$plain_bin")"
+    if [ -n "$plain_ram" ]; then
+      ptext="$ptext, память ~$(tg_ws_proxy_rs_mb "$plain_ram" 1), вытесняемая"
+    else
+      ptext="$ptext, код вытесняемый"
+    fi
   else
-    ptext='размер неизвестен'
+    ptext='флеш неизвестен'
   fi
-  if [ -n "$upx" ]; then
-    utext="$(tg_ws_proxy_rs_mb "$upx") скачать"
-    [ -n "$upx_bin" ] && utext="$utext, $(tg_ws_proxy_rs_mb "$upx_bin") на флеше"
+  if [ -n "$upx_bin" ]; then
+    utext="флеш $(tg_ws_proxy_rs_mb "$upx_bin")"
+    if [ -n "$upx_ram" ]; then
+      utext="$utext, память ~$(tg_ws_proxy_rs_mb "$upx_ram" 1)"
+    else
+      utext="$utext, память: образ в ОЗУ"
+    fi
+    [ -n "$plain_bin" ] && utext="$utext, до ~$(tg_ws_proxy_rs_mb "$plain_bin" 1), не вытесняется"
   else
-    utext='размер неизвестен'
+    utext='флеш неизвестен'
   fi
   echo
   info "Какую сборку поставить?"
-  echo "  1) Обычная — $ptext; код читается прямо с флеша, его страницы вытесняемые (рекомендуется)"
-  echo "  2) Компактная (UPX) — $utext; образ распаковывается в ОЗУ целиком и не вытесняется"
+  echo "  1) Обычная — $ptext (рекомендуется)"
+  echo "  2) Компактная (UPX) — $utext"
+  if [ -n "$plain" ] && [ -n "$upx" ]; then
+    echo "  Скачать: $(tg_ws_proxy_rs_mb "$plain") (обычная) / $(tg_ws_proxy_rs_mb "$upx") (UPX)."
+  fi
+  if [ -n "$plain_ram" ]; then
+    echo "  Память — RSS на mipsel после старта, без трафика; у обычной 1.6 МБ вытесняемые."
+  fi
   ask "Выбор [1/2, Enter = 1]: "
   read_menu answer
   case "$answer" in
@@ -3380,7 +3420,7 @@ tg_ws_proxy_rs_choose_variant() {
   if [ "$TG_WS_PROXY_RS_UPX" = "1" ]; then
     image=''
     [ -n "$plain_bin" ] && image=" (≈$(tg_ws_proxy_rs_mb "$plain_bin"))"
-    info "Компактная сборка: меньше флеша, но образ$image распаковывается в ОЗУ и остаётся там — на mipsel замерено +0.5 МБ сразу после старта и до ~3 МБ по мере прогрева кода."
+    info "Компактная сборка: образ$image распаковывается в ОЗУ целиком и не вытесняется — флеш экономится за счёт постоянной памяти."
   fi
   return 0
 }
