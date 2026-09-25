@@ -3318,26 +3318,59 @@ tg_ws_proxy_rs_mb() {
   awk -v b="$1" 'BEGIN{printf "%.2f МБ", b/1048576}'
 }
 
+# Размер распакованного бинаря: релиз кладёт его в .tar.gz, и на флеш ложится
+# заметно больше архива (у обычной сборки — примерно вдвое). Числа сняты с
+# релиза v2.4.5 (каждый архив скачан и распакован), поэтому обновлять их надо
+# вместе с ним — иначе меню покажет устаревший размер. Формат:
+# <target> <обычная> <upx>.
+TG_WS_PROXY_RS_BIN_SIZES="
+aarch64-unknown-linux-musl 3846224 1441272
+armv7-unknown-linux-musleabihf 3687132 1347496
+mipsel-unknown-linux-musl 4930100 1471168
+mips-unknown-linux-musl 4909616 1447848
+x86_64-unknown-linux-musl 4588192 1707600
+"
+
+# Размер бинаря для цели; пусто — цели нет в таблице (показываем только архив).
+tg_ws_proxy_rs_bin_size() {
+  local size
+  size=$(printf '%s\n' "$TG_WS_PROXY_RS_BIN_SIZES" | awk -v t="$1" -v v="$2" '$1==t{print (v=="upx")?$3:$2}')
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$size"
+}
+
 # Обычная сборка или компактная. Разница — флеш против ОЗУ: UPX-бинарь
 # распаковывается в память целиком, и вытеснить её ядро не может (у обычного
 # кода страницы файловые, их ядро освобождает под давлением, а на роутере нет
 # даже свопа). Поэтому по умолчанию — обычная, а компактная для тех боксов, где
 # флеша в обрез.
 tg_ws_proxy_rs_choose_variant() {
-  local target plain upx ptext utext answer
+  local target plain upx plain_bin upx_bin ptext utext answer image
   TG_WS_PROXY_RS_UPX=0
   target=$(tg_ws_proxy_rs_target 2>/dev/null) || target=''
-  plain=''; upx=''
+  plain=''; upx=''; plain_bin=''; upx_bin=''
   if [ -n "$target" ]; then
     plain=$(tg_ws_proxy_rs_asset_size "$target" '' 2>/dev/null) || plain=''
     upx=$(tg_ws_proxy_rs_asset_size "$target" '-upx' 2>/dev/null) || upx=''
+    plain_bin=$(tg_ws_proxy_rs_bin_size "$target" plain 2>/dev/null) || plain_bin=''
+    upx_bin=$(tg_ws_proxy_rs_bin_size "$target" upx 2>/dev/null) || upx_bin=''
   fi
-  if [ -n "$plain" ]; then ptext="$(tg_ws_proxy_rs_mb "$plain") архив"; else ptext='размер неизвестен'; fi
-  if [ -n "$upx" ]; then utext="$(tg_ws_proxy_rs_mb "$upx") архив"; else utext='размер неизвестен'; fi
+  if [ -n "$plain" ]; then
+    ptext="$(tg_ws_proxy_rs_mb "$plain") скачать"
+    [ -n "$plain_bin" ] && ptext="$ptext, $(tg_ws_proxy_rs_mb "$plain_bin") на флеше"
+  else
+    ptext='размер неизвестен'
+  fi
+  if [ -n "$upx" ]; then
+    utext="$(tg_ws_proxy_rs_mb "$upx") скачать"
+    [ -n "$upx_bin" ] && utext="$utext, $(tg_ws_proxy_rs_mb "$upx_bin") на флеше"
+  else
+    utext='размер неизвестен'
+  fi
   echo
   info "Какую сборку поставить?"
-  echo "  1) Обычная — $ptext; код читается прямо с флеша, и ядро может освобождать его страницы (рекомендуется)"
-  echo "  2) Компактная (UPX) — $utext; распаковывается в ОЗУ целиком и остаётся там резидентно"
+  echo "  1) Обычная — $ptext; код читается прямо с флеша, его страницы вытесняемые (рекомендуется)"
+  echo "  2) Компактная (UPX) — $utext; образ распаковывается в ОЗУ целиком и не вытесняется"
   ask "Выбор [1/2, Enter = 1]: "
   read_menu answer
   case "$answer" in
@@ -3345,7 +3378,9 @@ tg_ws_proxy_rs_choose_variant() {
     *) TG_WS_PROXY_RS_UPX=0 ;;
   esac
   if [ "$TG_WS_PROXY_RS_UPX" = "1" ]; then
-    info "Компактная сборка: меньше флеша, но память под распакованный образ не освободить."
+    image=''
+    [ -n "$plain_bin" ] && image=" (≈$(tg_ws_proxy_rs_mb "$plain_bin"))"
+    info "Компактная сборка: меньше флеша, но образ$image распаковывается в ОЗУ и остаётся там — на mipsel замерено +0.5 МБ сразу после старта и до ~3 МБ по мере прогрева кода."
   fi
   return 0
 }
