@@ -3175,12 +3175,12 @@ TG_WS_PROXY_RS_REPO="valnesfjord/tg-ws-proxy-rs"
 TG_WS_PROXY_RS_DC_TARGETS="2:149.154.167.220,4:149.154.167.220"
 TG_WS_PROXY_RS_TOP_DOMAINS=4
 TG_WS_PROXY_RS_FRONTING_DOMAIN="sprinthost.ru"
-# Латентность последней пробы и лучший из проверенных вариантов лестницы.
+# Латентность последней пробы, результаты перебора вариантов и выбор
+# пользователя.  Результаты — строками «индекс|ms|вердикт|описание».
 TG_WS_PROXY_RS_LAST_MS=""
-TG_WS_PROXY_RS_BEST_MS=""
-TG_WS_PROXY_RS_BEST_DC=""
-TG_WS_PROXY_RS_BEST_ARGS=""
-TG_WS_PROXY_RS_BEST_LABEL=""
+TG_WS_PROXY_RS_RESULTS=""
+TG_WS_PROXY_RS_PICK=""
+TG_WS_PROXY_RS_BEST_IDX=""
 
 is_tg_ws_proxy_rs_installed() { [ -x "$TG_WS_PROXY_RS_BIN" ]; }
 
@@ -3334,37 +3334,147 @@ tg_ws_proxy_rs_probe() {
   [ "$verdict" = "[OK ]" ]
 }
 
-# Пробует вариант лестницы и запоминает его, если он быстрее всех ответивших.
-# Сервис не перезапускается: проба поднимает собственный слушатель и читает
-# конфиг с диска, а перезапуск делается один раз — для победителя.
-tg_ws_proxy_rs_try() {
-  local ms
-  info "Пробуем: $3"
-  tg_ws_proxy_rs_conf_set DC_IP "$1" || return 1
-  tg_ws_proxy_rs_conf_set EXTRA_ARGS "$2" || return 1
-  tg_ws_proxy_rs_probe || return 1
+# Варианты лестницы: индекс → DC_IP | EXTRA_ARGS | описание.
+# Порядок здесь — порядок перебора; в списке для пользователя они сортируются
+# по замеру.
+tg_ws_proxy_rs_variant() {
+  case "$1" in
+    1) printf '%s|%s|%s\n' "$TG_WS_PROXY_RS_DC_TARGETS" \
+         "--pinned-upstream ws,cfproxy,tcp" "прямой WebSocket (ws → cfproxy → tcp)" ;;
+    2) printf '%s|%s|%s\n' "$TG_WS_PROXY_RS_DC_TARGETS" \
+         "--pinned-upstream ws,cfproxy,tcp --fronting-domain $TG_WS_PROXY_RS_FRONTING_DOMAIN" \
+         "прямой WebSocket с фронтингом SNI" ;;
+    3) printf '%s|%s|%s\n' "" "" "лестница по умолчанию (cfproxy → tcp)" ;;
+    4) printf '%s|%s|%s\n' "" "--cf-disable-tls" \
+         "cfproxy поверх ws:// (обход TLS-MITM, метаданные открытым текстом)" ;;
+    *) return 1 ;;
+  esac
+}
 
-  ms="$TG_WS_PROXY_RS_LAST_MS"; [ -n "$ms" ] || ms=999999
-  if [ -z "$TG_WS_PROXY_RS_BEST_MS" ] || [ "$ms" -lt "$TG_WS_PROXY_RS_BEST_MS" ]; then
-    TG_WS_PROXY_RS_BEST_MS="$ms"
-    TG_WS_PROXY_RS_BEST_DC="$1"
-    TG_WS_PROXY_RS_BEST_ARGS="$2"
-    TG_WS_PROXY_RS_BEST_LABEL="$3"
-    info "  ${ms}ms — пока лучший"
-  else
-    info "  ${ms}ms — медленнее лучшего (${TG_WS_PROXY_RS_BEST_MS}ms)"
-  fi
+# Проверяет каждый вариант пробой и складывает результат в
+# TG_WS_PROXY_RS_RESULTS строками «индекс|ms|вердикт|описание».
+# Сервис не перезапускается: проба поднимает собственный слушатель и читает
+# конфиг с диска.
+tg_ws_proxy_rs_probe_variants() {
+  local i row dc args label ms
+  TG_WS_PROXY_RS_RESULTS=""
+  i=1
+  while :; do
+    row=$(tg_ws_proxy_rs_variant "$i") || break
+    dc=$(printf '%s' "$row" | cut -d'|' -f1)
+    args=$(printf '%s' "$row" | cut -d'|' -f2)
+    label=$(printf '%s' "$row" | cut -d'|' -f3)
+
+    info "Пробуем: $label"
+    tg_ws_proxy_rs_conf_set DC_IP "$dc"
+    tg_ws_proxy_rs_conf_set EXTRA_ARGS "$args"
+    if tg_ws_proxy_rs_probe; then
+      ms="$TG_WS_PROXY_RS_LAST_MS"; [ -n "$ms" ] || ms=0
+      TG_WS_PROXY_RS_RESULTS="$TG_WS_PROXY_RS_RESULTS$i|$ms|OK|$label
+"
+    else
+      TG_WS_PROXY_RS_RESULTS="$TG_WS_PROXY_RS_RESULTS$i|999999|FAIL|$label
+"
+    fi
+    i=$((i + 1))
+  done
   return 0
 }
 
-# Подбор параметров под сеть: сначала CF-домены по замеру, затем лестница
-# тиров — побеждает первая, которую подтвердил пробник.
+# Печатает список проверенных путей в порядке перебора и помечает быстрейший из
+# обычных (обход TLS-MITM идёт запасным режимом и в сравнение не входит).
+tg_ws_proxy_rs_show_variants() {
+  local rows
+  rows=$(printf '%s' "$TG_WS_PROXY_RS_RESULTS" | grep -v '^$')
+  [ -n "$rows" ] || return 1
+
+  TG_WS_PROXY_RS_BEST_IDX=$(printf '%s\n' "$rows" \
+    | awk -F'|' '$1 != 4 && $3 == "OK" { print $2 " " $1 }' \
+    | sort -n | awk 'NR == 1 { print $2 }')
+
+  echo
+  printf '%s\n' "${BOLD}Проверенные пути:${NC}"
+  printf '%s\n' "$rows" | awk -F'|' -v best="$TG_WS_PROXY_RS_BEST_IDX" '
+    {
+      n++
+      mark = ($1 == best) ? "   <- быстрейший из обычных" : ""
+      if ($3 == "OK") printf "  [%d] %s — OK %sms%s\n", n, $4, $2, mark
+      else            printf "  [%d] %s — не ответил\n", n, $4
+    }'
+  return 0
+}
+
+# Спрашивает, какой путь взять. Пишет индекс в TG_WS_PROXY_RS_PICK;
+# пустая строка означает «оставить как было».
+tg_ws_proxy_rs_ask_variant() {
+  local rows pick row verdict tries=0
+  # Список печатается в том же порядке, поэтому номер в ответе — это строка
+  # результатов, а не отдельная нумерация.
+  rows=$(printf '%s' "$TG_WS_PROXY_RS_RESULTS" | grep -v '^$')
+  TG_WS_PROXY_RS_PICK=""
+
+  while [ "$tries" -lt 3 ]; do
+    if [ -n "$TG_WS_PROXY_RS_BEST_IDX" ]; then
+      ask "Какой путь взять? [Enter = быстрейший, 0 = не менять]: "
+    else
+      ask "Ни один путь не ответил. [Enter = не менять]: "
+    fi
+    read -r pick
+
+    case "$pick" in
+      "")
+        [ -n "$TG_WS_PROXY_RS_BEST_IDX" ] && TG_WS_PROXY_RS_PICK="$TG_WS_PROXY_RS_BEST_IDX"
+        return 0
+        ;;
+      0) return 0 ;;
+      *[!0-9]*) warn "Нужен номер из списка." ;;
+      *)
+        row=$(printf '%s\n' "$rows" | sed -n "${pick}p")
+        if [ -z "$row" ]; then
+          warn "Нет такого номера."
+        else
+          verdict=$(printf '%s' "$row" | cut -d'|' -f3)
+          if [ "$verdict" = "OK" ]; then
+            TG_WS_PROXY_RS_PICK=$(printf '%s' "$row" | cut -d'|' -f1)
+            return 0
+          fi
+          warn "Этот путь не ответил — выберите другой."
+        fi
+        ;;
+    esac
+    tries=$((tries + 1))
+  done
+  return 0
+}
+
+# Отвечал ли вариант с такими параметрами: по нему решается, считать ли
+# оставленный конфиг проверенным.
+tg_ws_proxy_rs_variant_ok_for() {
+  local i row
+  i=1
+  while :; do
+    row=$(tg_ws_proxy_rs_variant "$i") || return 1
+    if [ "$(printf '%s' "$row" | cut -d'|' -f1)" = "$1" ] &&
+       [ "$(printf '%s' "$row" | cut -d'|' -f2)" = "$2" ]; then
+      printf '%s' "$TG_WS_PROXY_RS_RESULTS" | grep -q "^$i|.*|OK|"
+      return $?
+    fi
+    i=$((i + 1))
+  done
+}
+
+# Подбор параметров под сеть: CF-домены по замеру, затем перебор вариантов
+# лестницы с пробой каждого — список с результатами отдаётся пользователю,
+# какой путь взять, решает он.
 tg_ws_proxy_rs_tune() {
-  local domains best
-  TG_WS_PROXY_RS_BEST_MS=""
-  TG_WS_PROXY_RS_BEST_DC=""
-  TG_WS_PROXY_RS_BEST_ARGS=""
-  TG_WS_PROXY_RS_BEST_LABEL=""
+  local domains best orig_dc orig_args
+  # Проба по ходу перебора пишет варианты в конфиг, поэтому исходные значения
+  # сохраняем: «не менять» должно вернуть именно их.
+  orig_dc=$(tg_ws_proxy_rs_conf_get DC_IP)
+  orig_args=$(tg_ws_proxy_rs_conf_get EXTRA_ARGS)
+  TG_WS_PROXY_RS_RESULTS=""
+  TG_WS_PROXY_RS_PICK=""
+  TG_WS_PROXY_RS_BEST_IDX=""
   info "Замер CF-доменов (--check, ~30 с)…"
   domains=$(tg_ws_proxy_rs_measure_domains | head -"$TG_WS_PROXY_RS_TOP_DOMAINS")
   if [ -z "$domains" ]; then
@@ -3375,39 +3485,32 @@ tg_ws_proxy_rs_tune() {
     info "Быстрейшие CF-домены: $best"
   fi
 
-  # Варианты проверяются все, и побеждает самый быстрый из ответивших: «первый
-  # ответивший» выбрал бы прямой WebSocket даже когда Cloudflare отвечает вдвое
-  # быстрее. Порядок ниже задаёт лишь разрешение ничьих.
-  tg_ws_proxy_rs_try "$TG_WS_PROXY_RS_DC_TARGETS" "--pinned-upstream ws,cfproxy,tcp" \
-    "прямой WebSocket (ws → cfproxy → tcp)"
-  tg_ws_proxy_rs_try "$TG_WS_PROXY_RS_DC_TARGETS" \
-    "--pinned-upstream ws,cfproxy,tcp --fronting-domain $TG_WS_PROXY_RS_FRONTING_DOMAIN" \
-    "прямой WebSocket с фронтингом SNI"
-  tg_ws_proxy_rs_try "" "" "лестница по умолчанию (cfproxy → tcp)"
+  # Все варианты проверяются пробой, а затем список отдаётся пользователю:
+  # какой путь взять — его решение, замер лишь показывает цену каждого.
+  tg_ws_proxy_rs_probe_variants
+  tg_ws_proxy_rs_show_variants
+  tg_ws_proxy_rs_ask_variant
 
-  if [ -n "$TG_WS_PROXY_RS_BEST_MS" ]; then
-    tg_ws_proxy_rs_conf_set DC_IP "$TG_WS_PROXY_RS_BEST_DC"
-    tg_ws_proxy_rs_conf_set EXTRA_ARGS "$TG_WS_PROXY_RS_BEST_ARGS"
+  if [ -n "$TG_WS_PROXY_RS_PICK" ]; then
+    row=$(tg_ws_proxy_rs_variant "$TG_WS_PROXY_RS_PICK")
+    tg_ws_proxy_rs_conf_set DC_IP "$(printf '%s' "$row" | cut -d'|' -f1)"
+    tg_ws_proxy_rs_conf_set EXTRA_ARGS "$(printf '%s' "$row" | cut -d'|' -f2)"
     service_restart "$TG_WS_PROXY_RS_INIT"
-    info "Выбран быстрейший путь: $TG_WS_PROXY_RS_BEST_LABEL (${TG_WS_PROXY_RS_BEST_MS}ms)"
+    info "Выбран путь: $(printf '%s' "$row" | cut -d'|' -f3)"
     return 0
   fi
 
-  # Ни один обычный путь не ответил — остаётся обход TLS-MITM. Он идёт последним
-  # не по скорости, а потому что это режим для сломанного TLS: до Cloudflare
-  # метаданные в нём идут открытым текстом.
-  if tg_ws_proxy_rs_try "" "--cf-disable-tls" "cfproxy поверх ws:// (обход TLS-MITM)"; then
-    tg_ws_proxy_rs_conf_set DC_IP ""
-    tg_ws_proxy_rs_conf_set EXTRA_ARGS "--cf-disable-tls"
-    service_restart "$TG_WS_PROXY_RS_INIT"
-    info "Обычные пути не ответили — работает обход TLS-MITM."
-    return 0
-  fi
-
-  warn "Ни одна лестница не подтвердилась — возвращаем лестницу по умолчанию."
-  tg_ws_proxy_rs_conf_set DC_IP ""
-  tg_ws_proxy_rs_conf_set EXTRA_ARGS ""
+  # Ничего не выбрано (или ни один путь не ответил) — возвращаем то, что было
+  # до подбора: перебор по ходу писал варианты в конфиг.
+  tg_ws_proxy_rs_conf_set DC_IP "$orig_dc"
+  tg_ws_proxy_rs_conf_set EXTRA_ARGS "$orig_args"
   service_restart "$TG_WS_PROXY_RS_INIT"
+
+  if tg_ws_proxy_rs_variant_ok_for "$orig_dc" "$orig_args"; then
+    info "Оставлены прежние параметры — этот путь отвечает."
+    return 0
+  fi
+  warn "Путь не изменён, но прежние параметры в списке не отвечали."
   return 1
 }
 
