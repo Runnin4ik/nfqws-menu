@@ -4,7 +4,7 @@
 
 Репозиторий также служит хранилищем готовых **стратегий** обхода DPI, **blobs** и **lists**.
 
-- Скрипт: [`nfqws-menu.sh`](nfqws-menu.sh) (текущая версия **0.6.67**)
+- Скрипт: [`nfqws-menu.sh`](nfqws-menu.sh) (текущая версия **0.6.69**)
 - Стратегии: [`strategies/`](strategies/)
 - Hosts: [`hosts`](hosts)
 - Контрольные суммы: [`SHA256SUMS`](SHA256SUMS), [`strategies/blobs/SHA256SUMS`](strategies/blobs/SHA256SUMS)
@@ -57,7 +57,7 @@ menu
 
 1. Определяет архитектуру процессора (`aarch64` / `mipsel` / `mips` …) — с кэшированием.
 2. Показывает **только установленные** компоненты (версии и статус):
-   - пакеты NFQWS / web, usque-keenetic, tg-ws-proxy, magitrickle;
+   - пакеты NFQWS / web, usque-keenetic, tg-ws-proxy, tg-ws-proxy-rs, magitrickle;
    - dpi-detector, awg-manager (`[+SB]` при наличии sing-box), KeenKit;
    - другие сервисы из `/opt/etc/init.d/`;
    - **⚡** — сервис запущен.
@@ -85,6 +85,7 @@ menu
       14. usque-keenetic
       15. MagiTrickle
       16. telemt / telemt-panel
+      17. TG WS Proxy Rust
 
 [::]  СЕРВИС (S)
       77. Change language
@@ -296,6 +297,8 @@ curl -sL https://raw.githubusercontent.com/rndnaame/awg-compressed/main/install-
 
 Локальный MTProto-прокси для Telegram Desktop, который ускоряет работу Telegram, перенаправляя трафик через WebSocket-соединения. Данные передаются в том же зашифрованном виде, а для работы не нужны сторонние серверы.
 
+Это Go-реализация; Rust-версия — отдельным пунктом **17**.
+
 Установка / обновление [tg-ws-proxy](https://github.com/spatiumstas/tg-ws-proxy-go):
 
 - Уже установлен → `opkg update && opkg upgrade tg-ws-proxy`
@@ -373,6 +376,19 @@ Telegram MTProto-прокси на Rust (полная реализация оф�
 | 2 | **Dropbear fix** — скрипт `sw.ext.io/ent/_addons/dropbear_fix` (с опцией сброса пароля root или без) |
 | U | **Обновить все пакеты** — `opkg update && opkg upgrade` (также клавиша **U** из главного меню) |
 
+### 17. TG WS Proxy Rust (tg-ws-proxy-rs)
+
+[tg-ws-proxy-rs](https://github.com/valnesfjord/tg-ws-proxy-rs) — тот же прокси на Rust. В opkg его нет: ставит его штатный `install.sh` проекта, он же пишет конфиг и Entware-инициализацию. Меню добавляет к установке:
+
+- **секрет и порт прежней Go-установки** — ссылки `tg://` у клиентов не меняются, Go-сервис останавливается и снимается с автозапуска;
+- **подбор параметров по замерам** — CF-домены и лестница тиров проверяются штатной пробой бинаря, выбирается самый быстрый ответивший путь;
+- **проверка связи до выдачи ссылки** — `resPQ` от DC Telegram, то есть вся цепочка, а не «порт открыт».
+
+Конфиги: `/opt/etc/tg-ws-proxy-rs/config.conf` (`DC_IP`, `CF_DOMAIN`, `EXTRA_ARGS`), `secret.conf`\
+Init: `/opt/etc/init.d/S99tg-ws-proxy-rs` (start / stop / status / restart)
+
+Проба есть с версии **2.4.5**; у более старого бинаря меню предложит обновиться.
+
 ### 77. Change language
 
 Мгновенное переключение интерфейса **ru ↔ en** (файл `/opt/etc/nfqws-menu.lang`).
@@ -408,6 +424,12 @@ Telegram MTProto-прокси на Rust (полная реализация оф�
 ---
 
 ## Changelog
+
+### 0.6.69
+
+- **TG WS Proxy Rust (п. 17)** — отдельный пункт: `tg-ws-proxy-rs` ставится релизом с GitHub, секрет и порт прежней Go-установки переносятся
+- **Подбор параметров** — CF-домены и лестница тиров проверяются штатной пробой бинаря (`--check-listener`, 2.4.5+), выбирается быстрейший ответивший путь
+- **Сквозная проверка** — ссылка выдаётся только после `resPQ` от DC Telegram
 
 ### 0.6.59 – 0.6.67
 
