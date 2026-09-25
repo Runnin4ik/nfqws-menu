@@ -201,7 +201,11 @@ drain_stdin() {
 # confirm_yes: Y/n — да по умолчанию. confirm_no: y/N — нет по умолчанию.
 confirm_yes() {
   ask "${1:-Continue?} [Y/n]: "
-  read_menu ans
+  # Ответ обнуляем перед чтением: если read не получит строки (конец ввода),
+  # прежнее значение не должно означать «да» — иначе долгий подбор запускается
+  # сам, а на экране при этом «[Y/n]: n».
+  ans=''
+  read_menu ans || return 1
   case "$ans" in n|N|н|Н) return 1 ;; esac
   return 0
 }
@@ -3355,7 +3359,7 @@ tg_ws_proxy_rs_ram_size() {  # $1 = target, $2 = plain|upx
 # даже свопа). Поэтому по умолчанию — обычная, а компактная для тех боксов, где
 # флеша в обрез.
 tg_ws_proxy_rs_choose_variant() {
-  local target plain_bin upx_bin plain_ram upx_ram answer image
+  local target plain_bin upx_bin plain_ram upx_ram answer image tries
   local plain_flash plain_mem plain_evict upx_flash upx_mem upx_evict
   TG_WS_PROXY_RS_UPX=0
   target=$(tg_ws_proxy_rs_target 2>/dev/null) || target=''
@@ -3397,12 +3401,19 @@ tg_ws_proxy_rs_choose_variant() {
   printf '  2) Компактная (UPX) %-9s%-11s%s\n' "$upx_flash" "$upx_mem" "$upx_evict"
   echo
   echo "  Рекомендуется обычная сборка; компактная — если флеш-памяти мало."
-  ask "Выбор [1/2, Enter = 1]: "
-  read_menu answer
-  case "$answer" in
-    2) TG_WS_PROXY_RS_UPX=1 ;;
-    *) TG_WS_PROXY_RS_UPX=0 ;;
-  esac
+  # Ответ не из списка не принимаем молча: сюда легко попасть нажатием «n» на
+  # предыдущий вопрос, и тогда на экране «n», а поставлено будет что-то другое.
+  tries=0
+  while [ "$tries" -lt 3 ]; do
+    ask "Выбор [1/2, Enter = 1]: "
+    read_menu answer || break
+    case "$answer" in
+      1|"") TG_WS_PROXY_RS_UPX=0; break ;;
+      2) TG_WS_PROXY_RS_UPX=1; break ;;
+      *) warn "Ответ не распознан — введите 1 или 2." ;;
+    esac
+    tries=$((tries + 1))
+  done
   if [ "$TG_WS_PROXY_RS_UPX" = "1" ]; then
     image=''
     [ -n "$plain_bin" ] && image=" (≈$(tg_ws_proxy_rs_mb "$plain_bin"))"
