@@ -1,0 +1,11 @@
+                    --filter-tcp=443,853 --filter-l7=http,tls
+                    --hostlist-domains=dot.pub,doh.pub,controld.com,opendns.com,anycast.censurfridns.dk,dns.alidns.com,libredns.gr,cloudflare-dns.com,one.one.one.one,opennameserver.org,cleanbrowsing.org,dns.adguard-dns.com,dns.comss.one,dns.nextdns.io,freedns.controld.com,dns10.quad9.net,dns.google
+                    --out-range=-d10
+                    --payload=tls_client_hello,http_req
+                    --lua-desync=multisplit:pos=sniext+4,midsld-1:seqovl=4
+                    --lua-desync=fake:blob=tls_google:tcp_seq=-10000:tcp_md5:tls_mod=rnd,dupsid,sni=ozon.ru:repeats=3
+                    --new
+                    --filter-udp=853 --filter-l7=quic
+                    --hostlist-domains=dns.adguard-dns.com,dns.nextdns.io
+                    --payload=quic_initial
+                    --lua-desync=send:ipfrag:ipfrag_pos_udp=128
