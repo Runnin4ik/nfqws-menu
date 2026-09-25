@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.68"
+SCRIPT_VERSION="0.6.69"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -201,7 +201,11 @@ drain_stdin() {
 # confirm_yes: Y/n — да по умолчанию. confirm_no: y/N — нет по умолчанию.
 confirm_yes() {
   ask "${1:-Continue?} [Y/n]: "
-  read_menu ans
+  # Ответ обнуляем перед чтением: если read не получит строки (конец ввода),
+  # прежнее значение не должно означать «да» — иначе долгий подбор запускается
+  # сам, а на экране при этом «[Y/n]: n».
+  ans=''
+  read_menu ans || return 1
   case "$ans" in n|N|н|Н) return 1 ;; esac
   return 0
 }
@@ -576,10 +580,10 @@ service_restart() {
 
 # Бэкап файла с меткой времени
 backup_file() {
-  local f="$1"
+  local f="$1" dest
   [ -f "$f" ] || return 0
-  cp -a "$f" "${f}.bak.$(date +%Y%m%d%H%M%S)"
-  info "Бэкап: ${f}.bak.*"
+  dest="${f}.bak.$(date +%Y%m%d%H%M%S)"
+  cp -a "$f" "$dest" && info "Бэкап: $dest"
 }
 
 # ---------------------------------------------------------------------------
@@ -659,10 +663,23 @@ proc_running() {
   printf '%s\n' "$PROC_CACHE" | grep -qF -- "$name"
 }
 
+# Как proc_running, но имя команды должно совпасть целиком: tg-ws-proxy-rs
+# содержит "tg-ws-proxy" подстрокой, и поиск фиксированной строки даёт ложный ⚡
+# у Go-сборки, когда запущена Rust.
+proc_running_exact() {
+  local name="$1"
+  [ -n "$PROC_CACHE" ] || refresh_proc_cache
+  printf '%s\n' "$PROC_CACHE" | grep -qE "(^|[ /])${name}( |\$)"
+}
+
 # kind → «запущен?» (по процессу / порту)
 service_is_up() {
   case "$1" in
-    nfqws|nfqws2|usque|tg-ws-proxy|magitrickle|awg-manager) proc_running "$1" ;;
+    nfqws|nfqws2|usque|magitrickle|awg-manager) proc_running "$1" ;;
+    # tg-ws-proxy-rs содержит "tg-ws-proxy" подстрокой, поэтому у Go-сборки
+    # совпадение по целому имени команды, а у Rust — по своей строке.
+    tg-ws-proxy)    proc_running_exact "tg-ws-proxy" ;;
+    tg-ws-proxy-rs) proc_running "tg-ws-proxy-rs" ;;
     web)
       port_is_open 90 || proc_running lighttpd
       ;;
@@ -711,6 +728,12 @@ show_installed() {
   print_pkg_info "nfqws-keenetic-web" "web"         && shown=1
   print_pkg_info "usque-keenetic"     "usque"       && shown=1
   print_pkg_info "tg-ws-proxy"        "tg-ws-proxy" && shown=1
+  if is_tg_ws_proxy_rs_installed; then
+    local rs_ver
+    rs_ver=$(tg_ws_proxy_rs_version)
+    print_tool_info "tg-ws-proxy-rs" "${rs_ver:-ok}" "tg-ws-proxy-rs"
+    shown=1
+  fi
   print_pkg_info "magitrickle"        "magitrickle" && shown=1
 
   if [ -x /opt/bin/dpi-detector ] || command -v dpi-detector >/dev/null 2>&1; then
@@ -764,7 +787,7 @@ show_installed() {
       svc=$(echo "$base" | sed 's/^S[0-9][0-9]//')
       [ -n "$svc" ] || continue
       case "$svc" in
-        nfqws|nfqws2|lighttpd|usque|tg-ws-proxy|magitrickle|telemt|telemt-panel) continue ;;
+        nfqws|nfqws2|lighttpd|usque|tg-ws-proxy|tg-ws-proxy-rs|magitrickle|telemt|telemt-panel) continue ;;
         awg-manager)
           is_installed "awg-manager" || [ -d /opt/etc/awg-manager ] && continue
           ;;
@@ -3135,6 +3158,662 @@ CFPROXY_DOMAINS_URL — значение по умолчанию/зеркало
 EOF
 }
 
+# ---------------------------------------------------------------------------
+# TG WS Proxy (Rust) — установка, подбор параметров и сквозная проверка
+# ---------------------------------------------------------------------------
+# В opkg этого пакета нет: это релизный бинарь с GitHub, и ставит его штатный
+# install.sh проекта — он же пишет config.conf и Entware-инициализацию под
+# rc.unslung. Меню добавляет то, чего у установщика быть не может: замер этой
+# сети, подбор параметров под неё и проверку, что выданная ссылка работает
+# целиком, а не «порт открыт».
+
+TG_WS_PROXY_RS_BIN="/opt/bin/tg-ws-proxy-rs"
+TG_WS_PROXY_RS_INIT="/opt/etc/init.d/S99tg-ws-proxy-rs"
+TG_WS_PROXY_RS_CONF_DIR="/opt/etc/tg-ws-proxy-rs"
+TG_WS_PROXY_RS_CONF="$TG_WS_PROXY_RS_CONF_DIR/config.conf"
+TG_WS_PROXY_RS_SECRET="$TG_WS_PROXY_RS_CONF_DIR/secret.conf"
+TG_WS_PROXY_GO_CONF_DIR="/opt/etc/tg-ws-proxy"
+TG_WS_PROXY_GO_INIT="/opt/etc/init.d/S99tg-ws-proxy"
+TG_WS_PROXY_RS_LOG="/opt/var/log/tg-ws-proxy-rs.log"
+TG_WS_PROXY_RS_REPO="valnesfjord/tg-ws-proxy-rs"
+TG_WS_PROXY_RS_DC_TARGETS="2:149.154.167.220,4:149.154.167.220"
+TG_WS_PROXY_RS_TOP_DOMAINS=4
+TG_WS_PROXY_RS_FRONTING_DOMAIN="sprinthost.ru"
+# Латентность последней пробы, результаты перебора вариантов и выбор
+# пользователя.  Результаты — строками «индекс|ms|вердикт|описание».
+TG_WS_PROXY_RS_LAST_MS=""
+TG_WS_PROXY_RS_RESULTS=""
+TG_WS_PROXY_RS_PICK=""
+TG_WS_PROXY_RS_BEST_IDX=""
+
+is_tg_ws_proxy_rs_installed() { [ -x "$TG_WS_PROXY_RS_BIN" ]; }
+
+tg_ws_proxy_rs_version() {
+  "$TG_WS_PROXY_RS_BIN" --version 2>/dev/null | head -1 | \
+    sed -n 's/.*[[:space:]]\([0-9][0-9.]*\)[[:space:]]*$/\1/p'
+}
+
+# config.conf — шелл-присваивания, читаем их sed-ом (так же делает инсталлер).
+tg_ws_proxy_rs_conf_get() {
+  sed -n "s/^$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}[[:space:]]*$/\1/p" "$TG_WS_PROXY_RS_CONF" 2>/dev/null \
+    | tr -d '\r' | head -1
+}
+
+# Записать ключ, сохранив остальные строки и комментарии. awk, а не sed:
+# значение приходит из сети и может содержать /, & и кавычки.
+tg_ws_proxy_rs_conf_set() {
+  local key="$1" val="$2" tmp="$TG_WS_PROXY_RS_CONF.tmp.$$"
+  [ -f "$TG_WS_PROXY_RS_CONF" ] || return 1
+  awk -v k="$key" -v v="$val" '
+    $0 ~ "^" k "=" { print k "=\"" v "\""; seen = 1; next }
+    { print }
+    END { if (!seen) print k "=\"" v "\"" }
+  ' "$TG_WS_PROXY_RS_CONF" > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 0600 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$TG_WS_PROXY_RS_CONF"
+}
+
+# Секрет до установки: свой не трогаем, чужой (из Go-установки) переносим, а если
+# нет ни того ни другого — генерируем сами.
+#
+# Генерировать приходится здесь: инсталлер делает это через `od -An -tx1`, а
+# `od` в BusyBox — и в прошивке Keenetic, и в самом Entware (`/opt/bin/od` —
+# симлинк на busybox) — такого ключа не знает, и установка падает на
+# `invalid option -- 'A'`. Свой генератор берёт из /dev/urandom только
+# hex-символы: каждый отобранный символ равновероятен из шестнадцати, то есть
+# те же 128 бит, что и у инсталлера.
+tg_ws_proxy_rs_ensure_secret() {
+  local s
+  s=$(sed -n 's/^SECRET=["]\{0,1\}\([^"]*\)["]\{0,1\}[[:space:]]*$/\1/p' "$TG_WS_PROXY_RS_SECRET" 2>/dev/null | tr -d '\r' | head -1)
+  [ -n "$s" ] && return 0
+
+  s=$(sed -n 's/^SECRET=["]\{0,1\}\([^"]*\)["]\{0,1\}[[:space:]]*$/\1/p' "$TG_WS_PROXY_GO_CONF_DIR/secret.conf" 2>/dev/null | tr -d '\r' | head -1)
+  if [ -n "$s" ]; then
+    mkdir -p "$TG_WS_PROXY_RS_CONF_DIR" || return 1
+    printf 'SECRET=%s\n' "$s" > "$TG_WS_PROXY_RS_SECRET"
+    chmod 0600 "$TG_WS_PROXY_RS_SECRET" 2>/dev/null || true
+    info "Секрет взят из Go-установки — прежние ссылки tg:// продолжат работать."
+    return 0
+  fi
+
+  s=$(tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 32)
+  case "$s" in
+    ????????????????????????????????) ;;
+    *)
+      warn "Не удалось сгенерировать секрет (/dev/urandom или tr недоступны)."
+      return 1
+      ;;
+  esac
+  mkdir -p "$TG_WS_PROXY_RS_CONF_DIR" || return 1
+  printf 'SECRET=%s\n' "$s" > "$TG_WS_PROXY_RS_SECRET"
+  chmod 0600 "$TG_WS_PROXY_RS_SECRET" 2>/dev/null || true
+  info "Секрет сгенерирован."
+  return 0
+}
+
+# Бэкапы конфига копятся с каждым подбором (по одному на прогон), поэтому
+# держим последние три — так же, как инсталлер поступает со своими.
+tg_ws_proxy_rs_prune_backups() {
+  local dir="$TG_WS_PROXY_RS_CONF_DIR" keep=3 old
+  [ -d "$dir" ] || return 0
+  # shellcheck disable=SC2012 # имена однотипные: config.conf.bak.<дата>
+  for old in $(ls -1 "$dir"/config.conf.bak.* 2>/dev/null | sort -r | tail -n +$((keep + 1))); do
+    rm -f "$old"
+  done
+  return 0
+}
+
+# Проба своего слушателя появилась в 2.4.5 — у более старого бинаря её нет.
+tg_ws_proxy_rs_supports_check_listener() {
+  "$TG_WS_PROXY_RS_BIN" --help 2>&1 | grep -q -- '--check-listener'
+}
+
+# Свободный порт для пробного запуска: сервис держит свой, а проба поднимает
+# собственный слушатель. Начинаем с порта сервиса + 1.
+tg_ws_proxy_rs_free_port() {
+  local base port
+  base=$(tg_ws_proxy_rs_conf_get PORT); [ -n "$base" ] || base=1443
+  port=$((base + 1))
+  while [ "$port" -lt $((base + 20)) ]; do
+    port_is_open "$port" || { echo "$port"; return 0; }
+    port=$((port + 1))
+  done
+  return 1
+}
+
+# Имя релизного архива — то, что инсталлер скачает и распакует. Меню нужно оно
+# до установки, чтобы показать размер, поэтому здесь повторены и источник
+# архитектуры (opkg print-architecture), и таблица entware_binary_target из
+# install.sh. Новую архитектуру придётся добавить в обоих местах.
+tg_ws_proxy_rs_target() {
+  local arch best='' best_pri='' name pri
+  arch=$(opkg print-architecture 2>/dev/null) || return 1
+  while read -r _keyword name pri; do
+    [ -n "$name" ] || continue
+    [ "$name" = all ] && continue
+    if [ -z "$best_pri" ] || [ "$pri" -gt "$best_pri" ] 2>/dev/null; then
+      best="$name"; best_pri="$pri"
+    fi
+  done <<EOF
+$arch
+EOF
+  case "$best" in
+    aarch64|aarch64-[0-9]*) printf '%s' aarch64-unknown-linux-musl ;;
+    armv7|armv7-[0-9]*) printf '%s' armv7-unknown-linux-musleabihf ;;
+    mipsel|mipsel-[0-9]*) printf '%s' mipsel-unknown-linux-musl ;;
+    mips|mips-[0-9]*) printf '%s' mips-unknown-linux-musl ;;
+    x64|x64-[0-9]*) printf '%s' x86_64-unknown-linux-musl ;;
+    *) return 1 ;;
+  esac
+}
+
+tg_ws_proxy_rs_mb() {  # $1 = байты, $2 = знаков после точки (1 или 2)
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  # %.2f и %.1f заданы буквально: в BusyBox awk нет формы с «*».
+  if [ "${2:-2}" = "1" ]; then
+    awk -v b="$1" 'BEGIN{printf "%.1f МБ", b/1048576}'
+  else
+    awk -v b="$1" 'BEGIN{printf "%.2f МБ", b/1048576}'
+  fi
+}
+
+# Размер распакованного бинаря: релиз кладёт его в .tar.gz, и на флеш ложится
+# заметно больше архива (у обычной сборки — примерно вдвое). Числа сняты с
+# релиза v2.4.5 (каждый архив скачан и распакован), поэтому обновлять их надо
+# вместе с ним — иначе меню покажет устаревший размер. Формат:
+# <target> <обычная> <upx>.
+TG_WS_PROXY_RS_BIN_SIZES="
+aarch64-unknown-linux-musl 3846224 1441272
+armv7-unknown-linux-musleabihf 3687132 1347496
+mipsel-unknown-linux-musl 4930100 1471168
+mips-unknown-linux-musl 4909616 1447848
+x86_64-unknown-linux-musl 4588192 1707600
+"
+
+# Размер бинаря для цели; пусто — цели нет в таблице (показываем только архив).
+tg_ws_proxy_rs_bin_size() {
+  local size
+  size=$(printf '%s\n' "$TG_WS_PROXY_RS_BIN_SIZES" | awk -v t="$1" -v v="$2" '$1==t{print (v=="upx")?$3:$2}')
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$size"
+}
+
+# Потребление памяти: RSS сразу после старта сервиса, без трафика. Замерено на
+# mipsel с релизом v2.4.5 (разброс между прогонами ±0.2 МБ). Формат:
+# <target> <обычная> <upx>, в килобайтах. Цель без строки — память покажем
+# словами, без чисел, чтобы не выдумывать чужие замеры.
+TG_WS_PROXY_RS_RAM_SIZES="
+mipsel-unknown-linux-musl 2688 3248
+"
+
+tg_ws_proxy_rs_ram_size() {  # $1 = target, $2 = plain|upx
+  local size
+  size=$(printf '%s\n' "$TG_WS_PROXY_RS_RAM_SIZES" | awk -v t="$1" -v v="$2" '$1==t{print (v=="upx")?$3:$2}')
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$size"
+}
+
+# Обычная сборка или компактная. Разница — флеш против ОЗУ: UPX-бинарь
+# распаковывается в память целиком, и вытеснить её ядро не может (у обычного
+# кода страницы файловые, их ядро освобождает под давлением, а на роутере нет
+# даже свопа). Поэтому по умолчанию — обычная, а компактная для тех боксов, где
+# флеша в обрез.
+tg_ws_proxy_rs_choose_variant() {
+  local target plain_bin upx_bin plain_ram upx_ram answer image tries
+  local plain_flash plain_mem plain_evict upx_flash upx_mem upx_evict
+  TG_WS_PROXY_RS_UPX=0
+  target=$(tg_ws_proxy_rs_target 2>/dev/null) || target=''
+  plain_bin=''; upx_bin=''; plain_ram=''; upx_ram=''
+  if [ -n "$target" ]; then
+    plain_bin=$(tg_ws_proxy_rs_bin_size "$target" plain 2>/dev/null) || plain_bin=''
+    upx_bin=$(tg_ws_proxy_rs_bin_size "$target" upx 2>/dev/null) || upx_bin=''
+    plain_ram=$(tg_ws_proxy_rs_ram_size "$target" plain 2>/dev/null) || plain_ram=''
+    upx_ram=$(tg_ws_proxy_rs_ram_size "$target" upx 2>/dev/null) || upx_ram=''
+    # Таблица в килобайтах (как /proc), форматтер ждёт байты.
+    [ -n "$plain_ram" ] && plain_ram=$((plain_ram * 1024))
+    [ -n "$upx_ram" ] && upx_ram=$((upx_ram * 1024))
+  fi
+  # Ячейки таблицы — только ASCII, а «МБ» стоит в заголовке: printf в BusyBox
+  # считает ширину в байтах, и кириллица в ячейке сломала бы выравнивание.
+  plain_flash='—'; plain_mem='—'; plain_evict='код вытесняемый'
+  upx_flash='—'; upx_mem='—'; upx_evict='образ в ОЗУ, не вытесняется'
+  if [ -n "$plain_bin" ]; then
+    plain_flash=$(tg_ws_proxy_rs_mb "$plain_bin"); plain_flash="${plain_flash% МБ}"
+  fi
+  if [ -n "$upx_bin" ]; then
+    upx_flash=$(tg_ws_proxy_rs_mb "$upx_bin"); upx_flash="${upx_flash% МБ}"
+  fi
+  if [ -n "$plain_ram" ]; then
+    plain_mem=$(tg_ws_proxy_rs_mb "$plain_ram" 1); plain_mem="~${plain_mem% МБ}"
+    plain_evict='1.6 МБ — код читается с флеша'
+  fi
+  if [ -n "$upx_ram" ]; then
+    upx_mem=$(tg_ws_proxy_rs_mb "$upx_ram" 1); upx_mem="~${upx_mem% МБ}+"
+    upx_evict='нет — образ распакован в ОЗУ'
+  elif [ -n "$plain_bin" ]; then
+    upx_evict="образ ≈$(tg_ws_proxy_rs_mb "$plain_bin") в ОЗУ, не вытесняется"
+  fi
+  echo
+  info "Какую сборку поставить?"
+  echo
+  echo "                      флеш, МБ память, МБ вытесняемых"
+  printf '  1) Обычная          %-9s%-11s%s\n' "$plain_flash" "$plain_mem" "$plain_evict"
+  printf '  2) Компактная (UPX) %-9s%-11s%s\n' "$upx_flash" "$upx_mem" "$upx_evict"
+  echo
+  echo "  Рекомендуется обычная сборка; компактная — если флеш-памяти мало."
+  # Ответ не из списка не принимаем молча: сюда легко попасть нажатием «n» на
+  # предыдущий вопрос, и тогда на экране «n», а поставлено будет что-то другое.
+  tries=0
+  while [ "$tries" -lt 3 ]; do
+    ask "Выбор [1/2, Enter = 1]: "
+    read_menu answer || break
+    case "$answer" in
+      1|"") TG_WS_PROXY_RS_UPX=0; break ;;
+      2) TG_WS_PROXY_RS_UPX=1; break ;;
+      *) warn "Ответ не распознан — введите 1 или 2." ;;
+    esac
+    tries=$((tries + 1))
+  done
+  if [ "$TG_WS_PROXY_RS_UPX" = "1" ]; then
+    image=''
+    [ -n "$plain_bin" ] && image=" (≈$(tg_ws_proxy_rs_mb "$plain_bin"))"
+    info "Компактная сборка: образ$image распаковывается в ОЗУ целиком и не вытесняется — флеш экономится за счёт постоянной памяти."
+  fi
+  return 0
+}
+
+tg_ws_proxy_rs_install() {
+  local url="https://raw.githubusercontent.com/${TG_WS_PROXY_RS_REPO}/main/install.sh"
+  local script="/tmp/tgws-install.$$.sh" out rc upx_arg='' bin_size size_text
+  tg_ws_proxy_rs_choose_variant || return 1
+  [ "$TG_WS_PROXY_RS_UPX" = "1" ] && upx_arg='--upx'
+  if ! download_file "$url" "$script"; then
+    error "Не удалось скачать install.sh — проверьте доступ к GitHub."
+    return 1
+  fi
+  tg_ws_proxy_rs_ensure_secret || return 1
+  info "Установка из релиза…"
+  # --platform entware: у установщика отдельная ветка для OpenWrt/LuCI, а на
+  # Keenetic нужен путь Entware (/opt + rc.unslung).
+  # Вывод показываем под отступом и без строк, которые дальше повторяет меню:
+  # ссылку оно печатает само (и только после проверки связи), а «Rollback
+  # backup» дублирует «Backup» тем же путём.
+  out=$(sh "$script" --platform entware $upx_arg 2>&1)
+  rc=$?
+  rm -f "$script"
+  # Инсталлер красит вывод ANSI-кодами, поэтому сначала снимаем цвет (меню
+  # красит само), затем убираем строки, которые дальше повторяет меню: ссылку
+  # оно печатает само и только после проверки связи, а «Rollback backup»
+  # дублирует «Backup» тем же путём.
+  esc=$(printf '\033')
+  printf '%s\n' "$out" \
+    | sed "s/${esc}\[[0-9;]*m//g" \
+    | grep -v -e '^Proxy link:' -e '^Rollback backup:' \
+    | sed 's/^/    /'
+  if [ "$rc" -ne 0 ]; then
+    error "install.sh завершился с ошибкой."
+    return 1
+  fi
+  is_tg_ws_proxy_rs_installed || { error "Бинарь не найден: $TG_WS_PROXY_RS_BIN"; return 1; }
+  bin_size=$(wc -c < "$TG_WS_PROXY_RS_BIN" 2>/dev/null | tr -d ' \r\n') || bin_size=''
+  size_text=$(tg_ws_proxy_rs_mb "$bin_size" 2>/dev/null) || size_text=''
+  if [ -n "$size_text" ]; then
+    info "Установлено: $(tg_ws_proxy_rs_version), $size_text"
+  else
+    info "Установлено: $(tg_ws_proxy_rs_version)"
+  fi
+  tg_ws_proxy_rs_disable_go_init || true
+  return 0
+}
+
+# Перезапуск без вывода init-скрипта: в этом пункте он только шумит, а факт
+# перезапуска сообщает одна строка.
+tg_ws_proxy_rs_restart() {
+  [ -x "$TG_WS_PROXY_RS_INIT" ] || return 0
+  if "$TG_WS_PROXY_RS_INIT" restart >/dev/null 2>&1; then
+    info "Сервис перезапущен."
+    return 0
+  fi
+  warn "Сервис не перезапустился — смотрите лог: $TG_WS_PROXY_RS_LOG"
+  return 1
+}
+
+# Прежний Go-сервис выключается на автозапуск, а не удаляется: два прокси на
+# одном порту после перезагрузки поднимутся оба, и один не сможет занять порт.
+# Инсталлер делает это сам, только если процесс Go ещё держал порт — если его
+# остановили раньше (как делает этот пункт), бит остаётся выставленным.
+tg_ws_proxy_rs_disable_go_init() {
+  [ -x "$TG_WS_PROXY_GO_INIT" ] || return 0
+  chmod -x "$TG_WS_PROXY_GO_INIT" || return 1
+  info "Go-сервис выключен из автозапуска: $TG_WS_PROXY_GO_INIT (вернуть — chmod +x)."
+  return 0
+}
+
+# Замер CF-доменов: --check печатает строку на домен, но WARN-строки лога
+# влезают в ту же строку, поэтому результат берём из [OK ] в строке.
+# На выходе «ms домен» по возрастанию, только ответившие.
+tg_ws_proxy_rs_measure_domains() {
+  "$TG_WS_PROXY_RS_BIN" --check --default-domains 2>&1 | while IFS= read -r line; do
+    case "$line" in
+      *"[OK ]"*) ;;
+      *) continue ;;
+    esac
+    dom=$(printf '%s' "$line" | sed -n 's/^ *kws2\.\([^ ]*\) .*/\1/p')
+    ms=$(printf '%s' "$line" | sed -n 's/.*\[OK \] *\([0-9][0-9]*\)ms.*/\1/p')
+    [ -n "$dom" ] && [ -n "$ms" ] && printf '%s %s\n' "$ms" "$dom"
+  done | sort -n | awk '!seen[$2]++ { print $2 }'
+}
+
+# Сквозная проверка штатной пробой бинаря: он поднимает слушатель на свободном
+# порту с тем же секретом, маршрутами и тирами, что и сервис, и требует resPQ от
+# DC Telegram. Конфиг читается так же, как его читает init-скрипт — через
+# переменные окружения (с той же чисткой CR, что и там: файл мог побывать в
+# редакторе на Windows).
+tg_ws_proxy_rs_probe() {
+  local port out section verdict
+  port=$(tg_ws_proxy_rs_free_port) || {
+    warn "Нет свободного порта для проверки (заняты порты рядом с сервисным)."
+    return 1
+  }
+
+  out=$(
+    scrub_and_source() {
+      tr -d '\r' < "$1" > "/tmp/tgws-conf.$$" && . "/tmp/tgws-conf.$$"
+      rm -f "/tmp/tgws-conf.$$"
+    }
+    scrub_and_source "$TG_WS_PROXY_RS_CONF" 2>/dev/null
+    scrub_and_source "$TG_WS_PROXY_RS_SECRET" 2>/dev/null
+
+    [ -n "$HOST" ] && export TG_HOST="$HOST"
+    [ -n "$LINK_IP" ] && export TG_LINK_IP="$LINK_IP"
+    export TG_SECRET="$SECRET"
+    [ "$DEFAULT_DOMAINS" = "true" ] && export TG_DEFAULT_DOMAINS="true"
+    [ -n "$CF_DOMAIN" ] && export TG_CF_DOMAIN="$CF_DOMAIN"
+    [ -n "$CF_WORKER_DOMAIN" ] && export TG_CF_WORKER_DOMAIN="$CF_WORKER_DOMAIN"
+    [ -n "$MTPROTO_PROXY" ] && export TG_MTPROTO_PROXY="$MTPROTO_PROXY"
+
+    # shellcheck disable=SC2086 # EXTRA_ARGS — список аргументов, как его пишет инсталлер
+    "$TG_WS_PROXY_RS_BIN" --port "$port" --check-listener $EXTRA_ARGS 2>&1
+  )
+
+  # В том же прогоне проверяются и CF-домены, поэтому вердикт берём из секции
+  # своего слушателя, а не из кода выхода. Заодно запоминаем её латентность —
+  # по ней ищется быстрейший вариант лестницы.
+  section=$(printf '%s\n' "$out" | sed -n '/Own listener/,/^=\{10,\}/p')
+  verdict=$(printf '%s\n' "$section" | grep -o '\[\(OK \|FAIL\|SKIP\)\]' | head -1)
+  TG_WS_PROXY_RS_LAST_MS=$(printf '%s\n' "$section" | grep -o '[0-9][0-9]*ms' | head -1 | tr -d 'ms')
+  [ "$verdict" = "[OK ]" ]
+}
+
+# Варианты лестницы: индекс → DC_IP | EXTRA_ARGS | описание.
+# Порядок здесь — порядок перебора; в списке для пользователя они сортируются
+# по замеру.
+tg_ws_proxy_rs_variant() {
+  case "$1" in
+    1) printf '%s|%s|%s\n' "$TG_WS_PROXY_RS_DC_TARGETS" \
+         "--pinned-upstream ws,cfproxy,tcp" "прямой WebSocket (ws → cfproxy → tcp)" ;;
+    2) printf '%s|%s|%s\n' "$TG_WS_PROXY_RS_DC_TARGETS" \
+         "--pinned-upstream ws,cfproxy,tcp --fronting-domain $TG_WS_PROXY_RS_FRONTING_DOMAIN" \
+         "прямой WebSocket с фронтингом SNI" ;;
+    3) printf '%s|%s|%s\n' "" "" "лестница по умолчанию (cfproxy → tcp)" ;;
+    4) printf '%s|%s|%s\n' "" "--cf-disable-tls" \
+         "cfproxy поверх ws:// (порт 80 вместо 443)" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Проверяет каждый вариант пробой и складывает результат в
+# TG_WS_PROXY_RS_RESULTS строками «индекс|ms|вердикт|описание».
+# Сервис не перезапускается: проба поднимает собственный слушатель и читает
+# конфиг с диска.
+tg_ws_proxy_rs_probe_variants() {
+  local i row dc args label ms
+  TG_WS_PROXY_RS_RESULTS=""
+  info "Проверяю варианты (по одному прогону на каждый, это самая долгая часть)…"
+  i=1
+  while :; do
+    row=$(tg_ws_proxy_rs_variant "$i") || break
+    dc=$(printf '%s' "$row" | cut -d'|' -f1)
+    args=$(printf '%s' "$row" | cut -d'|' -f2)
+    label=$(printf '%s' "$row" | cut -d'|' -f3)
+
+    # Ничего не печатаем: итог покажет список ниже, а строка на каждый вариант
+    # его же и дублировала.
+    tg_ws_proxy_rs_conf_set DC_IP "$dc"
+    tg_ws_proxy_rs_conf_set EXTRA_ARGS "$args"
+    if tg_ws_proxy_rs_probe; then
+      ms="$TG_WS_PROXY_RS_LAST_MS"; [ -n "$ms" ] || ms=0
+      TG_WS_PROXY_RS_RESULTS="$TG_WS_PROXY_RS_RESULTS$i|$ms|OK|$label
+"
+    else
+      TG_WS_PROXY_RS_RESULTS="$TG_WS_PROXY_RS_RESULTS$i|999999|FAIL|$label
+"
+    fi
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# Печатает список проверенных путей: обычные — с временем и пометкой быстрейшего,
+# запасной режим TLS-MITM — отдельной строкой ниже: он для сломанного TLS, а не
+# для скорости, и часто оказывается быстрее всех просто потому, что идёт по
+# открытому HTTP.
+tg_ws_proxy_rs_show_variants() {
+  local rows normal fallback
+  rows=$(printf '%s' "$TG_WS_PROXY_RS_RESULTS" | grep -v '^$')
+  [ -n "$rows" ] || return 1
+  normal=$(printf '%s\n' "$rows" | awk -F'|' '$1 != 4')
+  fallback=$(printf '%s\n' "$rows" | awk -F'|' '$1 == 4')
+
+  TG_WS_PROXY_RS_BEST_IDX=$(printf '%s\n' "$normal" \
+    | awk -F'|' '$3 == "OK" { print $2 " " $1 }' \
+    | sort -n | awk 'NR == 1 { print $2 }')
+
+  echo
+  printf '%s\n' "${BOLD}Проверенные пути:${NC}"
+  printf '%s\n' "$normal" | awk -F'|' -v best="$TG_WS_PROXY_RS_BEST_IDX" '
+    {
+      n++
+      mark = ($1 == best) ? "   <- быстрейший" : ""
+      if ($3 == "OK") printf "  [%d] OK   %5sms  %s%s\n", n, $2, $4, mark
+      else            printf "  [%d] FAIL         %s\n", n, $4
+    }'
+  if [ -n "$fallback" ]; then
+    echo
+    printf '%s\n' "  запасной режим (TLS-MITM, метаданные идут открыто):"
+    printf '%s\n' "$fallback" | awk -F'|' '
+      {
+        if ($3 == "OK") printf "  [%d] OK   %5sms  %s\n", $1, $2, $4
+        else            printf "  [%d] FAIL         %s\n", $1, $4
+      }'
+  fi
+  return 0
+}
+
+# Спрашивает, какой путь взять. Пишет индекс в TG_WS_PROXY_RS_PICK;
+# пустая строка означает «оставить как было».
+tg_ws_proxy_rs_ask_variant() {
+  local rows pick row verdict tries=0
+  # Список печатается в том же порядке, поэтому номер в ответе — это строка
+  # результатов, а не отдельная нумерация.
+  rows=$(printf '%s' "$TG_WS_PROXY_RS_RESULTS" | grep -v '^$')
+  TG_WS_PROXY_RS_PICK=""
+
+  while [ "$tries" -lt 3 ]; do
+    if [ -n "$TG_WS_PROXY_RS_BEST_IDX" ]; then
+      ask "Какой путь взять? [Enter = быстрейший, 0 = не менять]: "
+    else
+      ask "Ни один путь не ответил. [Enter = не менять]: "
+    fi
+    read -r pick
+
+    case "$pick" in
+      "")
+        [ -n "$TG_WS_PROXY_RS_BEST_IDX" ] && TG_WS_PROXY_RS_PICK="$TG_WS_PROXY_RS_BEST_IDX"
+        return 0
+        ;;
+      0) return 0 ;;
+      *[!0-9]*) warn "Нужен номер из списка." ;;
+      *)
+        row=$(printf '%s\n' "$rows" | awk -F'|' -v n="$pick" '$1 == n')
+        if [ -z "$row" ]; then
+          warn "Нет такого номера."
+        else
+          verdict=$(printf '%s' "$row" | cut -d'|' -f3)
+          if [ "$verdict" = "OK" ]; then
+            TG_WS_PROXY_RS_PICK=$(printf '%s' "$row" | cut -d'|' -f1)
+            return 0
+          fi
+          warn "Этот путь не ответил — выберите другой."
+        fi
+        ;;
+    esac
+    tries=$((tries + 1))
+  done
+  return 0
+}
+
+# Отвечал ли вариант с такими параметрами: по нему решается, считать ли
+# оставленный конфиг проверенным.
+tg_ws_proxy_rs_variant_ok_for() {
+  local i row
+  i=1
+  while :; do
+    row=$(tg_ws_proxy_rs_variant "$i") || return 1
+    if [ "$(printf '%s' "$row" | cut -d'|' -f1)" = "$1" ] &&
+       [ "$(printf '%s' "$row" | cut -d'|' -f2)" = "$2" ]; then
+      printf '%s' "$TG_WS_PROXY_RS_RESULTS" | grep -q "^$i|.*|OK|"
+      return $?
+    fi
+    i=$((i + 1))
+  done
+}
+
+# Подбор параметров под сеть: CF-домены по замеру, затем перебор вариантов
+# лестницы с пробой каждого — список с результатами отдаётся пользователю,
+# какой путь взять, решает он.
+tg_ws_proxy_rs_tune() {
+  local domains best orig_dc orig_args
+  # Проба по ходу перебора пишет варианты в конфиг, поэтому исходные значения
+  # сохраняем: «не менять» должно вернуть именно их.
+  orig_dc=$(tg_ws_proxy_rs_conf_get DC_IP)
+  orig_args=$(tg_ws_proxy_rs_conf_get EXTRA_ARGS)
+  TG_WS_PROXY_RS_RESULTS=""
+  TG_WS_PROXY_RS_PICK=""
+  TG_WS_PROXY_RS_BEST_IDX=""
+  info "Замер CF-доменов…"
+  domains=$(tg_ws_proxy_rs_measure_domains | head -"$TG_WS_PROXY_RS_TOP_DOMAINS")
+  if [ -z "$domains" ]; then
+    warn "Ни один CF-домен не ответил — оставляем список по умолчанию."
+  else
+    best=$(printf '%s\n' "$domains" | tr '\n' ',' | sed 's/,$//')
+    tg_ws_proxy_rs_conf_set CF_DOMAIN "$best"
+    info "CF-домены: $best"
+  fi
+
+  # Все варианты проверяются пробой, а затем список отдаётся пользователю:
+  # какой путь взять — его решение, замер лишь показывает цену каждого.
+  tg_ws_proxy_rs_probe_variants
+  tg_ws_proxy_rs_show_variants
+  tg_ws_proxy_rs_ask_variant
+
+  if [ -n "$TG_WS_PROXY_RS_PICK" ]; then
+    row=$(tg_ws_proxy_rs_variant "$TG_WS_PROXY_RS_PICK")
+    tg_ws_proxy_rs_conf_set DC_IP "$(printf '%s' "$row" | cut -d'|' -f1)"
+    tg_ws_proxy_rs_conf_set EXTRA_ARGS "$(printf '%s' "$row" | cut -d'|' -f2)"
+    tg_ws_proxy_rs_restart
+    info "Путь: $(printf '%s' "$row" | cut -d'|' -f3)"
+    return 0
+  fi
+
+  # Ничего не выбрано (или ни один путь не ответил) — возвращаем то, что было
+  # до подбора: перебор по ходу писал варианты в конфиг.
+  tg_ws_proxy_rs_conf_set DC_IP "$orig_dc"
+  tg_ws_proxy_rs_conf_set EXTRA_ARGS "$orig_args"
+  tg_ws_proxy_rs_restart
+
+  if tg_ws_proxy_rs_variant_ok_for "$orig_dc" "$orig_args"; then
+    info "Оставлены прежние параметры — этот путь отвечает."
+    return 0
+  fi
+  warn "Путь не изменён, но прежние параметры в списке не отвечали."
+  return 1
+}
+
+tg_ws_proxy_rs_print_link() {
+  local link
+  echo
+  link=$(sed -n 's/.*\(tg:\/\/proxy?[^ ]*\).*/\1/p' "$TG_WS_PROXY_RS_LOG" 2>/dev/null | tail -1)
+  if [ -n "$link" ]; then
+    printf '%s\n' "${BOLD}Ссылка для клиентов:${NC}"
+    printf '%s\n' "${BOLD}  $link${NC}"
+  else
+    warn "Ссылки в логе нет — сервис, похоже, не запущен."
+    [ -x "$TG_WS_PROXY_RS_INIT" ] && "$TG_WS_PROXY_RS_INIT" status
+  fi
+  echo
+  printf '%s\n' "  config: $TG_WS_PROXY_RS_CONF_DIR/config.conf (секрет — secret.conf рядом)"
+  printf '%s\n' "  init:   $TG_WS_PROXY_RS_INIT"
+}
+
+menu_tg_ws_proxy_rs() {
+  local fresh=0
+  echo
+
+  if is_tg_ws_proxy_rs_installed; then
+    info "TG WS Proxy Rust — установлено $(tg_ws_proxy_rs_version)"
+    if confirm_yes "Переустановить/обновить из последнего релиза?"; then
+      tg_ws_proxy_rs_install || return 1
+    fi
+  else
+    info "TG WS Proxy Rust (tg-ws-proxy-rs)"
+    # Порт занимает прежний Go-прокси: пока его сервис запущен, Rust не сможет
+    # занять тот же порт. Секрет при этом переносится, ссылки не меняются.
+    if is_installed "tg-ws-proxy" && service_is_up tg-ws-proxy; then
+      warn "Go-прокси (tg-ws-proxy) сейчас занимает порт."
+      if confirm_yes "Остановить Go-прокси? Секрет перенесём, ссылки не изменятся."; then
+        [ -x "$TG_WS_PROXY_GO_INIT" ] && "$TG_WS_PROXY_GO_INIT" stop 2>/dev/null
+      fi
+    fi
+    confirm_yes "Установить tg-ws-proxy-rs?" || return 0
+    tg_ws_proxy_rs_install || return 1
+    fresh=1
+  fi
+
+  echo
+  if ! tg_ws_proxy_rs_supports_check_listener; then
+    warn "У этого бинаря нет пробы своего слушателя — нужна версия 2.4.5 или новее."
+    warn "Обновить: перезапустите этот пункт и подтвердите переустановку."
+    tg_ws_proxy_rs_print_link
+    return 0
+  fi
+
+  # На чистой установке подбор не спрашивают: только что поставили — незачем
+  # оставлять прокси невыверенным. Спрашиваем при повторном заходе.
+  if [ "$fresh" = "1" ] || confirm_yes "Подобрать параметры и проверить?"; then
+    backup_file "$TG_WS_PROXY_RS_CONF"
+    tg_ws_proxy_rs_prune_backups
+    if tg_ws_proxy_rs_tune; then
+      echo
+      info "Связь проверена: resPQ от DC Telegram."
+    else
+      echo
+      warn "Связь не подтвердилась. Последние строки лога:"
+      tail -n 8 "$TG_WS_PROXY_RS_LOG" 2>/dev/null | sed 's/^/    /'
+    fi
+  fi
+
+  tg_ws_proxy_rs_print_link
+}
+
+remove_tg_ws_proxy_rs() {
+  is_tg_ws_proxy_rs_installed || { warn "tg-ws-proxy-rs не установлен."; return 0; }
+  [ -x "$TG_WS_PROXY_RS_INIT" ] && "$TG_WS_PROXY_RS_INIT" stop 2>/dev/null
+  rm -f "$TG_WS_PROXY_RS_INIT" "$TG_WS_PROXY_RS_BIN"
+  info "tg-ws-proxy-rs удалён (конфиг и секрет оставлены в $TG_WS_PROXY_RS_CONF_DIR)."
+  return 0
+}
+
 menu_usque_keenetic() {
   echo
   info "usque-keenetic"
@@ -3851,6 +4530,7 @@ menu_remove() {
   is_dpi_detector_installed         && items="$items dpi-detector"
   is_awg_manager_installed          && items="$items awg-manager"
   is_installed "tg-ws-proxy"        && items="$items tg-ws-proxy"
+  is_tg_ws_proxy_rs_installed       && items="$items tg-ws-proxy-rs"
   is_installed "usque-keenetic"     && items="$items usque-keenetic"
   is_installed "magitrickle"        && items="$items magitrickle"
   is_installed "opera-proxy"        && items="$items opera-proxy"
@@ -3894,6 +4574,7 @@ menu_remove() {
         dpi-detector)  remove_dpi_detector ;;
         awg-manager)   remove_awg_manager ;;
         tg-ws-proxy)   remove_tg_ws_proxy ;;
+        tg-ws-proxy-rs) remove_tg_ws_proxy_rs ;;
         usque-keenetic) remove_usque_keenetic ;;
         magitrickle)   remove_magitrickle ;;
         opera-proxy)   remove_opera_proxy ;;
@@ -4165,6 +4846,7 @@ main_menu() {
     echo "      14. usque-keenetic"
     echo "      15. MagiTrickle"
     echo "      16. telemt / telemt-panel"
+    echo "      17. TG WS Proxy Rust"
     echo
     printf '%s\n' "${CYAN}${BOLD}[::]  ${LBL_REMOVE} (S)${NC}"
     echo "      77. $LBL_77"
@@ -4194,6 +4876,7 @@ main_menu() {
       14) menu_usque_keenetic || true ;;
       15) menu_magitrickle || true ;;
       16) menu_telemt || true ;;
+      17) menu_tg_ws_proxy_rs || true ;;
       S|s) menu_service || true ;;
       U|u) opkg_upgrade_all || true ;;
       o|O) menu_opera_hidden || true ;;
