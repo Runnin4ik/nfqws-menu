@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.71"
+SCRIPT_VERSION="0.6.72"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -917,21 +917,165 @@ install_nfqws2() {
   ask_web_install
 }
 
+# Метаданные .ipk из Packages index: base_url pkg_name → VERSION\tFILENAME
+# base_url без завершающего /
+fetch_ipk_meta() {
+  local base="$1" pkg="$2" tmp meta
+  tmp="/tmp/nfqws-pkg-idx-$$"
+  rm -f "$tmp" "${tmp}.gz"
+  if download_file "${base}/Packages" "$tmp" 2>/dev/null; then
+    :
+  elif download_file "${base}/Packages.gz" "${tmp}.gz" 2>/dev/null; then
+    if command -v gunzip >/dev/null 2>&1; then
+      gunzip -c "${tmp}.gz" > "$tmp" 2>/dev/null || true
+    elif command -v zcat >/dev/null 2>&1; then
+      zcat "${tmp}.gz" > "$tmp" 2>/dev/null || true
+    fi
+    rm -f "${tmp}.gz"
+  else
+    rm -f "$tmp" "${tmp}.gz"
+    return 1
+  fi
+  [ -s "$tmp" ] || { rm -f "$tmp"; return 1; }
+  meta=$(awk -v pkg="$pkg" '
+    BEGIN { cur=""; ver=""; fn="" }
+    /^Package: / { cur=$2; ver=""; fn="" }
+    /^Version: / { ver=$2 }
+    /^Filename: / { fn=$2 }
+    /^$/ {
+      if (cur == pkg && ver != "" && fn != "") { print ver "\t" fn; exit 0 }
+    }
+    END {
+      if (cur == pkg && ver != "" && fn != "") print ver "\t" fn
+    }
+  ' "$tmp")
+  rm -f "$tmp"
+  [ -n "$meta" ] || return 1
+  printf '%s\n' "$meta"
+}
+
+# Скачать .ipk в /tmp и opkg install (download_file: зеркала/туннели).
+# $1=label  $2=package  $3=repo_base (…/mipsel или …/all)
+install_ipk_from_repo() {
+  local label="$1" pkg="$2" base="$3"
+  local meta ver fn url dest
+
+  [ -z "$ARCH" ] && detect_arch
+
+  info "Получение сведений о пакете $pkg ..."
+  meta=$(fetch_ipk_meta "$base" "$pkg") || {
+    error "Не удалось прочитать индекс пакетов: ${base}/Packages"
+    return 1
+  }
+  ver=$(printf '%s\n' "$meta" | cut -f1)
+  fn=$(printf '%s\n' "$meta" | cut -f2)
+  [ -n "$ver" ] && [ -n "$fn" ] || {
+    error "В индексе нет $pkg"
+    return 1
+  }
+
+  url="${base}/${fn}"
+  dest="/tmp/${fn}"
+  info "Скачивание $label $ver ..."
+  info "URL: $url"
+  if ! download_file "$url" "$dest"; then
+    error "Не удалось скачать $fn"
+    rm -f "$dest"
+    return 1
+  fi
+  if [ ! -s "$dest" ]; then
+    error "Скачанный файл пуст: $dest"
+    rm -f "$dest"
+    return 1
+  fi
+
+  info "Установка: opkg install $dest"
+  install_deps
+  if opkg install "$dest"; then
+    info "$label $ver установлен."
+  else
+    warn "opkg install вернул ошибку, пробуем --force-reinstall ..."
+    if opkg install --force-reinstall "$dest"; then
+      info "$label $ver переустановлен."
+    else
+      error "Не удалось установить $fn"
+      rm -f "$dest"
+      return 1
+    fi
+  fi
+  rm -f "$dest"
+  return 0
+}
+
+# Пункт 3: прямая установка/обновление .ipk
+menu_install_ipk_direct() {
+  local v1="?" v2="?" vweb="?" base1 base2 baseweb meta choice
+
+  [ -z "$ARCH" ] && detect_arch
+
+  base1="https://nfqws.github.io/nfqws-keenetic/${ARCH}"
+  base2="https://nfqws.github.io/nfqws2-keenetic/${ARCH}"
+  baseweb="https://nfqws.github.io/nfqws-keenetic-web/all"
+
+  info "Запрос крайних версий .ipk (архитектура: $ARCH) ..."
+  meta=$(fetch_ipk_meta "$base1" "nfqws-keenetic" 2>/dev/null) && v1=$(printf '%s\n' "$meta" | cut -f1)
+  meta=$(fetch_ipk_meta "$base2" "nfqws2-keenetic" 2>/dev/null) && v2=$(printf '%s\n' "$meta" | cut -f1)
+  meta=$(fetch_ipk_meta "$baseweb" "nfqws-keenetic-web" 2>/dev/null) && vweb=$(printf '%s\n' "$meta" | cut -f1)
+
+  echo
+  printf '%s\n' "${BOLD}Установка/обновление пакета (обход DPI) — .ipk:${NC}"
+  printf "  1) nfqws-keenetic       (%s)\n" "$v1"
+  printf "  2) nfqws2-keenetic      (%s)\n" "$v2"
+  printf "  3) nfqws-keenetic-web   (%s)\n" "$vweb"
+  echo "  0) Отмена"
+  ask "Выбор [0]: "
+  read_menu choice
+  case "$choice" in
+    1)
+      [ "$v1" = "?" ] && { error "Версия nfqws-keenetic неизвестна (индекс недоступен)."; return 1; }
+      install_ipk_from_repo "nfqws-keenetic" "nfqws-keenetic" "$base1" || return 1
+      ask_web_install
+      ;;
+    2)
+      [ "$v2" = "?" ] && { error "Версия nfqws2-keenetic неизвестна (индекс недоступен)."; return 1; }
+      if is_installed "nfqws-keenetic"; then
+        warn "Обнаружен nfqws-keenetic. Рекомендуется удалить его перед установкой nfqws2."
+        if confirm_no "Удалить nfqws-keenetic и веб-интерфейс?"; then
+          opkg remove --autoremove nfqws-keenetic-web nfqws-keenetic 2>/dev/null || true
+        fi
+      fi
+      install_ipk_from_repo "nfqws2-keenetic" "nfqws2-keenetic" "$base2" || return 1
+      ask_web_install
+      ;;
+    3)
+      [ "$vweb" = "?" ] && { error "Версия nfqws-keenetic-web неизвестна (индекс недоступен)."; return 1; }
+      install_ipk_from_repo "nfqws-keenetic-web" "nfqws-keenetic-web" "$baseweb" || return 1
+      info "Адрес: http://<IP-роутера>:90"
+      info "Логин/пароль — учётные данные Entware (по умолчанию root / keenetic)"
+      ;;
+    0|"") info "Отменено."; return 0 ;;
+    *) warn "Неверный выбор"; return 1 ;;
+  esac
+}
+
 menu_install_nfqws() {
   echo
   printf '%s\n' "${BOLD}Выберите версию для установки:${NC}"
-  echo "  1) nfqws-keenetic  (версия 1)"
-  echo "  2) nfqws2-keenetic (версия 2)"
+  echo "  1) nfqws-keenetic  (версия 1, через opkg repo)"
+  echo "  2) nfqws2-keenetic (версия 2, через opkg repo)"
+  echo "  3) Установка/обновление пакета (обход DPI) — прямое .ipk"
   echo "  0) Назад"
-  ask "Ваш выбор [1/2/0]: "
+  ask "Ваш выбор [1/2/3/0]: "
   read_menu choice
   case "$choice" in
     1) install_nfqws1 ;;
     2) install_nfqws2 ;;
+    3) menu_install_ipk_direct ;;
     0|"") return ;;
     *) warn "Неверный выбор" ;;
   esac
 }
+
 
 install_web() {
   info "Установка nfqws-keenetic-web..."
