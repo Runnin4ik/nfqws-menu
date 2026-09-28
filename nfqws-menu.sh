@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.72"
+SCRIPT_VERSION="0.6.75"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -107,8 +107,8 @@ ui_apply_lang() {
       LBL_S1="Сжать bin/sbin (UPX)"
       LBL_S2="Dropbear fix"
       LBL_U="Обновить все пакеты"
-      LBL_1="Установить NFQWS/NFQWS2"
-      LBL_2="Установить веб-интерфейс"
+      LBL_1="Установка NFQWS / NFQWS2"
+      LBL_2="nfqws-keenetic-web"
       LBL_3="Выбор стратегии"
       LBL_4="Обновить IPSet List"
       LBL_5="Загрузить rkn.list (125k+ доменов)"
@@ -141,8 +141,8 @@ ui_apply_lang() {
       LBL_S1="Compress bin/sbin (UPX)"
       LBL_S2="Dropbear fix"
       LBL_U="Upgrade all packages"
-      LBL_1="Install NFQWS/NFQWS2"
-      LBL_2="Install web UI"
+      LBL_1="Install NFQWS / NFQWS2"
+      LBL_2="nfqws-keenetic-web"
       LBL_3="Select strategy"
       LBL_4="Update IPSet List"
       LBL_5="Download rkn.list (125k+ domains)"
@@ -938,19 +938,22 @@ fetch_ipk_meta() {
   fi
   [ -s "$tmp" ] || { rm -f "$tmp"; return 1; }
   meta=$(awk -v pkg="$pkg" '
-    BEGIN { cur=""; ver=""; fn="" }
-    /^Package: / { cur=$2; ver=""; fn="" }
-    /^Version: / { ver=$2 }
-    /^Filename: / { fn=$2 }
-    /^$/ {
-      if (cur == pkg && ver != "" && fn != "") { print ver "\t" fn; exit 0 }
+    BEGIN { cur=""; ver=""; fn=""; found=0 }
+    /^Package: / {
+      if (found) exit
+      cur=$2; ver=""; fn=""
     }
-    END {
-      if (cur == pkg && ver != "" && fn != "") print ver "\t" fn
+    cur == pkg && /^Version: /  { ver=$2 }
+    cur == pkg && /^Filename: / { fn=$2 }
+    cur == pkg && ver != "" && fn != "" {
+      print ver "\t" fn
+      found=1
+      exit
     }
-  ' "$tmp")
+  ' "$tmp" | head -1)
   rm -f "$tmp"
   [ -n "$meta" ] || return 1
+  # одна строка: VERSION<TAB>FILENAME
   printf '%s\n' "$meta"
 }
 
@@ -967,8 +970,8 @@ install_ipk_from_repo() {
     error "Не удалось прочитать индекс пакетов: ${base}/Packages"
     return 1
   }
-  ver=$(printf '%s\n' "$meta" | cut -f1)
-  fn=$(printf '%s\n' "$meta" | cut -f2)
+  ver=$(printf '%s\n' "$meta" | head -1 | cut -f1 | tr -d '\r')
+  fn=$(printf '%s\n' "$meta" | head -1 | cut -f2 | tr -d '\r')
   [ -n "$ver" ] && [ -n "$fn" ] || {
     error "В индексе нет $pkg"
     return 1
@@ -1018,16 +1021,19 @@ menu_install_ipk_direct() {
   baseweb="https://nfqws.github.io/nfqws-keenetic-web/all"
 
   info "Запрос крайних версий .ipk (архитектура: $ARCH) ..."
-  meta=$(fetch_ipk_meta "$base1" "nfqws-keenetic" 2>/dev/null) && v1=$(printf '%s\n' "$meta" | cut -f1)
-  meta=$(fetch_ipk_meta "$base2" "nfqws2-keenetic" 2>/dev/null) && v2=$(printf '%s\n' "$meta" | cut -f1)
-  meta=$(fetch_ipk_meta "$baseweb" "nfqws-keenetic-web" 2>/dev/null) && vweb=$(printf '%s\n' "$meta" | cut -f1)
+  meta=$(fetch_ipk_meta "$base1" "nfqws-keenetic" 2>/dev/null) && v1=$(printf '%s\n' "$meta" | head -1 | cut -f1 | tr -d '\r')
+  meta=$(fetch_ipk_meta "$base2" "nfqws2-keenetic" 2>/dev/null) && v2=$(printf '%s\n' "$meta" | head -1 | cut -f1 | tr -d '\r')
+  meta=$(fetch_ipk_meta "$baseweb" "nfqws-keenetic-web" 2>/dev/null) && vweb=$(printf '%s\n' "$meta" | head -1 | cut -f1 | tr -d '\r')
+  [ -z "$v1" ] && v1="?"
+  [ -z "$v2" ] && v2="?"
+  [ -z "$vweb" ] && vweb="?"
 
   echo
-  printf '%s\n' "${BOLD}Установка/обновление пакета (обход DPI) — .ipk:${NC}"
-  printf "  1) nfqws-keenetic       (%s)\n" "$v1"
-  printf "  2) nfqws2-keenetic      (%s)\n" "$v2"
-  printf "  3) nfqws-keenetic-web   (%s)\n" "$vweb"
-  echo "  0) Отмена"
+  printf '%s\n' "${BOLD}── Установка / обновление .ipk (обход DPI) ──${NC}"
+  printf "  %s1)%s  nfqws-keenetic       %s%s%s\n" "$GREEN" "$NC" "$CYAN" "$v1" "$NC"
+  printf "  %s2)%s  nfqws2-keenetic      %s%s%s\n" "$GREEN" "$NC" "$CYAN" "$v2" "$NC"
+  printf "  %s3)%s  nfqws-keenetic-web   %s%s%s\n" "$GREEN" "$NC" "$CYAN" "$vweb" "$NC"
+  printf "  %s0)%s  Отмена\n" "$DIM" "$NC"
   ask "Выбор [0]: "
   read_menu choice
   case "$choice" in
@@ -1060,22 +1066,23 @@ menu_install_ipk_direct() {
 
 menu_install_nfqws() {
   echo
-  printf '%s\n' "${BOLD}Выберите версию для установки:${NC}"
-  echo "  1) nfqws-keenetic  (версия 1, через opkg repo)"
-  echo "  2) nfqws2-keenetic (версия 2, через opkg repo)"
-  echo "  3) Установка/обновление пакета (обход DPI) — прямое .ipk"
-  echo "  0) Назад"
-  ask "Ваш выбор [1/2/3/0]: "
+  printf '%s\n' "${BOLD}── Установка NFQWS / NFQWS2 ──${NC}"
+  printf "  %s1)%s  nfqws-keenetic\n" "$GREEN" "$NC"
+  printf "  %s2)%s  nfqws2-keenetic\n" "$GREEN" "$NC"
+  printf "  %s3)%s  nfqws-keenetic-web\n" "$GREEN" "$NC"
+  printf "  %s4)%s  Установка / обновление .ipk (обход DPI)\n" "$GREEN" "$NC"
+  printf "  %s0)%s  Назад\n" "$DIM" "$NC"
+  ask "Ваш выбор [0]: "
   read_menu choice
   case "$choice" in
     1) install_nfqws1 ;;
     2) install_nfqws2 ;;
-    3) menu_install_ipk_direct ;;
+    3) install_web ;;
+    4) menu_install_ipk_direct ;;
     0|"") return ;;
     *) warn "Неверный выбор" ;;
   esac
 }
-
 
 install_web() {
   info "Установка nfqws-keenetic-web..."
@@ -4961,16 +4968,15 @@ main_menu() {
     show_installed
     printf '%s\n' "${CYAN}${BOLD}[::]  ${LBL_COMPONENTS}${NC}"
     echo "      1.  $LBL_1"
-    echo "      2.  $LBL_2"
     echo
     printf '%s\n' "${CYAN}${BOLD}[::]  ${LBL_STRATEGIES}${NC}"
-    echo "      3.  $LBL_3"
-    echo "      4.  $LBL_4"
-    echo "      5.  $LBL_5"
-    echo "      6.  $LBL_6"
-    echo "      7.  $LBL_7"
-    echo "      8.  $LBL_8"
-    echo "      9.  $LBL_9"
+    echo "      2.  $LBL_3"
+    echo "      3.  $LBL_4"
+    echo "      4.  $LBL_5"
+    echo "      5.  $LBL_6"
+    echo "      6.  $LBL_7"
+    echo "      7.  $LBL_8"
+    echo "      8.  $LBL_9"
     echo
     printf '%s\n' "${CYAN}${BOLD}[::]  ${LBL_UTILS}${NC}"
     echo "      10. dpi-detector"
@@ -4994,14 +5000,13 @@ main_menu() {
     # || true — при set -e любой return 1 из пункта не должен завершать скрипт
     case "$choice" in
       1)  menu_install_nfqws || true ;;
-      2)  install_web || true ;;
-      3)  menu_strategy || true ;;
-      4)  update_ipset_list || true ;;
-      5)  update_rkn_list || true ;;
-      6)  menu_dot_doh || true ;;
-      7)  menu_change_fake_blob || true ;;
-      8)  menu_update_hosts || true ;;
-      9)  menu_dns_manage || true ;;
+      2)  menu_strategy || true ;;
+      3)  update_ipset_list || true ;;
+      4)  update_rkn_list || true ;;
+      5)  menu_dot_doh || true ;;
+      6)  menu_change_fake_blob || true ;;
+      7)  menu_update_hosts || true ;;
+      8)  menu_dns_manage || true ;;
       10) menu_dpi_detector || true ;;
       11) menu_awg_manager || true ;;
       12) menu_keenkit || true ;;
