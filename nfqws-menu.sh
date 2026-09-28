@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.75"
+SCRIPT_VERSION="0.6.76"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -993,7 +993,6 @@ install_ipk_from_repo() {
   fi
 
   info "Установка: opkg install $dest"
-  install_deps
   if opkg install "$dest"; then
     info "$label $ver установлен."
   else
