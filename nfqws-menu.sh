@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.77"
+SCRIPT_VERSION="0.6.78"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -264,10 +264,9 @@ list_strategies_from_cache() {
 # Альтернативные URL для raw.githubusercontent.com / api.github.com (зеркала CDN).
 # Печатает по одному URL на строку; исходный — первым.
 github_alt_urls() {
+  # Порядок: ghproxy → CDN → оригинал (при DPI быстрее)
   local url="$1" rest owner repo ref path_rest
-  printf '%s\n' "$url"
 
-  # raw.githubusercontent.com/OWNER/REPO/REF/PATH
   case "$url" in
     https://raw.githubusercontent.com/*)
       rest="${url#https://raw.githubusercontent.com/}"
@@ -275,14 +274,13 @@ github_alt_urls() {
       repo="${rest%%/*}"; rest="${rest#*/}"
       ref="${rest%%/*}"; path_rest="${rest#*/}"
       if [ -n "$owner" ] && [ -n "$repo" ] && [ -n "$ref" ] && [ -n "$path_rest" ]; then
-        # refs/heads/main → main для jsDelivr
         case "$ref" in
           refs/heads/*) ref="${ref#refs/heads/}" ;;
           refs/tags/*)  ref="${ref#refs/tags/}" ;;
         esac
+        printf '%s\n' "https://ghproxy.net/https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${path_rest}"
         printf '%s\n' "https://cdn.jsdelivr.net/gh/${owner}/${repo}@${ref}/${path_rest}"
         printf '%s\n' "https://fastly.jsdelivr.net/gh/${owner}/${repo}@${ref}/${path_rest}"
-        printf '%s\n' "https://ghproxy.net/https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${path_rest}"
       fi
       ;;
     https://api.github.com/*)
@@ -291,12 +289,11 @@ github_alt_urls() {
     https://github.com/*/releases/download/*)
       printf '%s\n' "https://ghproxy.net/${url}"
       ;;
-  esac
-  case "$url" in
     https://*.github.io/*|http://*.github.io/*)
       printf '%s\n' "https://ghproxy.net/${url}"
       ;;
   esac
+  printf '%s\n' "$url"
 }
 
 # Одна попытка HTTP GET в stdout
@@ -972,9 +969,18 @@ ipk_filename() {
 fetch_ipk_meta() {
   local base="$1" pkg="$2" tmp meta ver fn repo
 
+  # 1) быстро: VERSION через ghproxy/CDN
+  repo=$(ipk_github_repo "$pkg") || return 1
+  ver=$(fetch_pkg_version_file "$repo") || ver=""
+  if [ -n "$ver" ]; then
+    fn=$(ipk_filename "$pkg" "$ver")
+    printf '%s\t%s\n' "$ver" "$fn"
+    return 0
+  fi
+
+  # 2) Packages с github.io (если VERSION недоступен)
   tmp="/tmp/nfqws-pkg-idx-$$"
   rm -f "$tmp" "${tmp}.gz"
-
   if download_file "${base}/Packages" "$tmp" 2>/dev/null; then
     :
   elif download_file "${base}/Packages.gz" "${tmp}.gz" 2>/dev/null; then
@@ -1009,13 +1015,7 @@ fetch_ipk_meta() {
   else
     rm -f "$tmp" "${tmp}.gz"
   fi
-
-  # fallback: VERSION с GitHub (зеркала)
-  repo=$(ipk_github_repo "$pkg") || return 1
-  ver=$(fetch_pkg_version_file "$repo") || return 1
-  fn=$(ipk_filename "$pkg" "$ver")
-  printf '%s\t%s\n' "$ver" "$fn"
-  return 0
+  return 1
 }
 
 # Скачать .ipk: github.io → GitHub Releases
@@ -1042,9 +1042,8 @@ install_ipk_from_repo() {
   info "Скачивание $label $ver ..."
 
   repo=$(ipk_github_repo "$pkg") || repo=""
-  for url in \
-    "${base}/${fn}" \
-    ${repo:+"https://github.com/${repo}/releases/download/v${ver}/${fn}"}
+  # releases (ghproxy) раньше github.io
+  for url in     ${repo:+"https://github.com/${repo}/releases/download/v${ver}/${fn}"}     "${base}/${fn}"
   do
     [ -n "$url" ] || continue
     info "URL: $url"
