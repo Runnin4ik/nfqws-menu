@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.70"
+SCRIPT_VERSION="0.6.71"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -1627,32 +1627,55 @@ menu_strategy() {
 # ---------------------------------------------------------------------------
 # 4. IPSet List
 # ---------------------------------------------------------------------------
-IPSET_SOURCE_URL="https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main/.service/ipset-service.txt"
+IPSET_FLOWSEAL_URL="https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main/.service/ipset-service.txt"
+# Стандартные списки из официальных пакетов nfqws
+IPSET_NFQWS1_URL="https://raw.githubusercontent.com/nfqws/nfqws-keenetic/master/etc/nfqws/ipset.list"
+IPSET_NFQWS2_URL="https://raw.githubusercontent.com/nfqws/nfqws2-keenetic/master/etc/nfqws2/lists/ipset.list"
 
-update_ipset_list() {
-  need_nfqws_installed || return
-  pick_nfqws_ver 1 || return
-
-  local tmp cleaned count
-  tmp="/tmp/nfqws-ipset-$$.txt"
-  cleaned="/tmp/nfqws-ipset-clean-$$.txt"
-
-  info "Скачивание IPSet с Flowseal/zapret-discord-youtube ..."
-  info "URL: $IPSET_SOURCE_URL"
-  if ! download_file "$IPSET_SOURCE_URL" "$tmp"; then
+# Скачать URL → cleaned; выставляет count. 0=ok, 1=ошибка.
+_ipset_fetch_clean() {
+  local url="$1" tmp="$2" cleaned="$3"
+  info "URL: $url"
+  if ! download_file "$url" "$tmp"; then
     error "Не удалось скачать список."
-    rm -f "$tmp"
     return 1
   fi
-
   grep -vE '^[[:space:]]*(#|;|$)' "$tmp" | sed 's/[[:space:]]*$//' | grep -vE '^$' > "$cleaned" || true
   count=$(wc -l < "$cleaned" 2>/dev/null | tr -d ' ')
   if [ -z "$count" ] || [ "$count" = "0" ]; then
     error "Скачанный файл пуст или не содержит записей."
-    rm -f "$tmp" "$cleaned"
     return 1
   fi
   info "Записей в списке: $count"
+  return 0
+}
+
+update_ipset_list() {
+  need_nfqws_installed || return
+
+  local choice tmp cleaned count src_label
+  tmp="/tmp/nfqws-ipset-$$.txt"
+  cleaned="/tmp/nfqws-ipset-clean-$$.txt"
+
+  echo
+  printf '%s\n' "${RED}${BOLD}⚠ ОСТОРОЖНО${NC}"
+  printf '%s\n' "${RED}Вы собираетесь изменить ipset.list.${NC}"
+  printf '%s\n' "${RED}Большой список CIDR от Flowseal (33K+) может нагрузить роутер${NC}"
+  printf '%s\n' "${RED}и поломать работу отдельных сервисов / сайтов.${NC}"
+  echo
+  echo "  1) Загрузить IPSet от FlowSeal (33K+ CIDR)"
+  echo "  2) Загрузить стандартный IPSet от nfqws-keenetic"
+  echo "  0) Отмена"
+  ask "Выбор [0]: "
+  read -r choice
+  case "$choice" in
+    1) ;;
+    2) ;;
+    0|"") info "Отменено."; return 0 ;;
+    *) warn "Неверный выбор."; return 1 ;;
+  esac
+
+  pick_nfqws_ver 1 || return
 
   write_ipset() {
     local dest="$1" dir
@@ -1663,19 +1686,75 @@ update_ipset_list() {
     info "Записано: $dest ($count строк)"
   }
 
+  apply_and_restart() {
+    case "$NFQWS_VER" in
+      1)
+        write_ipset "/opt/etc/nfqws/ipset.list"
+        service_restart /opt/etc/init.d/S51nfqws
+        info "Сервис nfqws перезапущен."
+        ;;
+      2)
+        write_ipset "/opt/etc/nfqws2/lists/ipset.list"
+        service_restart /opt/etc/init.d/S51nfqws2
+        info "Сервис nfqws2 перезапущен."
+        ;;
+      both)
+        write_ipset "/opt/etc/nfqws/ipset.list"
+        write_ipset "/opt/etc/nfqws2/lists/ipset.list"
+        service_restart /opt/etc/init.d/S51nfqws
+        service_restart /opt/etc/init.d/S51nfqws2
+        info "Сервисы перезапущены."
+        ;;
+    esac
+  }
+
+  if [ "$choice" = "1" ]; then
+    src_label="Flowseal/zapret-discord-youtube"
+    info "Скачивание IPSet с $src_label ..."
+    if ! _ipset_fetch_clean "$IPSET_FLOWSEAL_URL" "$tmp" "$cleaned"; then
+      rm -f "$tmp" "$cleaned"
+      return 1
+    fi
+    apply_and_restart
+    rm -f "$tmp" "$cleaned"
+    return 0
+  fi
+
+  # choice=2 — стандартный ipset из репозитория пакета
+  src_label="nfqws (офиставка пакета)"
+  info "Скачивание стандартного IPSet ($src_label) ..."
+
   case "$NFQWS_VER" in
     1)
+      if ! _ipset_fetch_clean "$IPSET_NFQWS1_URL" "$tmp" "$cleaned"; then
+        rm -f "$tmp" "$cleaned"
+        return 1
+      fi
       write_ipset "/opt/etc/nfqws/ipset.list"
       service_restart /opt/etc/init.d/S51nfqws
       info "Сервис nfqws перезапущен."
       ;;
     2)
+      if ! _ipset_fetch_clean "$IPSET_NFQWS2_URL" "$tmp" "$cleaned"; then
+        rm -f "$tmp" "$cleaned"
+        return 1
+      fi
       write_ipset "/opt/etc/nfqws2/lists/ipset.list"
       service_restart /opt/etc/init.d/S51nfqws2
       info "Сервис nfqws2 перезапущен."
       ;;
     both)
+      # v1
+      if ! _ipset_fetch_clean "$IPSET_NFQWS1_URL" "$tmp" "$cleaned"; then
+        rm -f "$tmp" "$cleaned"
+        return 1
+      fi
       write_ipset "/opt/etc/nfqws/ipset.list"
+      # v2
+      if ! _ipset_fetch_clean "$IPSET_NFQWS2_URL" "$tmp" "$cleaned"; then
+        rm -f "$tmp" "$cleaned"
+        return 1
+      fi
       write_ipset "/opt/etc/nfqws2/lists/ipset.list"
       service_restart /opt/etc/init.d/S51nfqws
       service_restart /opt/etc/init.d/S51nfqws2
