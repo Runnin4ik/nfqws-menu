@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.78"
+SCRIPT_VERSION="0.6.84"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -945,8 +945,25 @@ ipk_github_repo() {
 
 # Версия из raw VERSION (fetch_url → зеркала jsDelivr/ghproxy)
 fetch_pkg_version_file() {
-  local repo="$1" ver
-  ver=$(fetch_url "https://raw.githubusercontent.com/${repo}/master/VERSION" 2>/dev/null | tr -d ' \t\r\n' | head -1)
+  # Только быстрые зеркала, короткие таймауты (без долгого GitHub)
+  local repo="$1" ver url _c _m _w
+  _c="$CURL_CONNECT_TIMEOUT"; _m="$CURL_MAX_TIME"; _w="$WGET_TIMEOUT"
+  CURL_CONNECT_TIMEOUT=4
+  CURL_MAX_TIME=10
+  WGET_TIMEOUT=10
+  ver=""
+  for url in \
+    "https://ghproxy.net/https://raw.githubusercontent.com/${repo}/master/VERSION" \
+    "https://cdn.jsdelivr.net/gh/${repo}@master/VERSION" \
+    "https://fastly.jsdelivr.net/gh/${repo}@master/VERSION"
+  do
+    ver=$(_http_get_stdout "$url" 2>/dev/null | tr -d ' \t\r\n' | head -1)
+    [ -n "$ver" ] && break
+    ver=""
+  done
+  CURL_CONNECT_TIMEOUT="$_c"
+  CURL_MAX_TIME="$_m"
+  WGET_TIMEOUT="$_w"
   [ -n "$ver" ] || return 1
   printf '%s\n' "$ver"
 }
@@ -967,71 +984,125 @@ ipk_filename() {
 # Метаданные .ipk: Packages (github.io) → fallback VERSION + имя файла
 # stdout: VERSION<TAB>FILENAME
 fetch_ipk_meta() {
-  local base="$1" pkg="$2" tmp meta ver fn repo
-
-  # 1) быстро: VERSION через ghproxy/CDN
+  # Только VERSION (быстро). Packages не трогаем.
+  local base="$1" pkg="$2" ver fn repo
   repo=$(ipk_github_repo "$pkg") || return 1
-  ver=$(fetch_pkg_version_file "$repo") || ver=""
-  if [ -n "$ver" ]; then
-    fn=$(ipk_filename "$pkg" "$ver")
-    printf '%s\t%s\n' "$ver" "$fn"
-    return 0
-  fi
-
-  # 2) Packages с github.io (если VERSION недоступен)
-  tmp="/tmp/nfqws-pkg-idx-$$"
-  rm -f "$tmp" "${tmp}.gz"
-  if download_file "${base}/Packages" "$tmp" 2>/dev/null; then
-    :
-  elif download_file "${base}/Packages.gz" "${tmp}.gz" 2>/dev/null; then
-    if command -v gunzip >/dev/null 2>&1; then
-      gunzip -c "${tmp}.gz" > "$tmp" 2>/dev/null || true
-    elif command -v zcat >/dev/null 2>&1; then
-      zcat "${tmp}.gz" > "$tmp" 2>/dev/null || true
-    fi
-    rm -f "${tmp}.gz"
-  fi
-
-  if [ -s "$tmp" ]; then
-    meta=$(awk -v pkg="$pkg" '
-      BEGIN { cur=""; ver=""; fn=""; found=0 }
-      /^Package: / {
-        if (found) exit
-        cur=$2; ver=""; fn=""
-      }
-      cur == pkg && /^Version: /  { ver=$2 }
-      cur == pkg && /^Filename: / { fn=$2 }
-      cur == pkg && ver != "" && fn != "" {
-        print ver "\t" fn
-        found=1
-        exit
-      }
-    ' "$tmp" | head -1)
-    rm -f "$tmp"
-    if [ -n "$meta" ]; then
-      printf '%s\n' "$meta"
-      return 0
-    fi
-  else
-    rm -f "$tmp" "${tmp}.gz"
-  fi
-  return 1
+  ver=$(fetch_pkg_version_file "$repo") || return 1
+  fn=$(ipk_filename "$pkg" "$ver")
+  printf '%s\t%s\n' "$ver" "$fn"
+  return 0
 }
 
 # Скачать .ipk: github.io → GitHub Releases
+# Путь основного конфига пакета (пусто если не nfqws*)
+ipk_conf_path() {
+  case "$1" in
+    nfqws-keenetic)  echo "/opt/etc/nfqws/nfqws.conf" ;;
+    nfqws2-keenetic) echo "/opt/etc/nfqws2/nfqws2.conf" ;;
+    *) echo "" ;;
+  esac
+}
+
+# Каталог etc пакета в data.tar.gz
+ipk_etc_dir() {
+  case "$1" in
+    nfqws-keenetic)  echo "/opt/etc/nfqws" ;;
+    nfqws2-keenetic) echo "/opt/etc/nfqws2" ;;
+    *) echo "" ;;
+  esac
+}
+
+# Если opkg не положил conffiles — достаём их из data.tar.gz .ipk
+# (типично после «Not deleting modified conffile» + rm -rf: статус opkg
+#  считает файлы «пользовательскими» и при install не восстанавливает)
+extract_ipk_etc() {
+  local ipk="$1" pkg="$2" tmp etc
+  etc=$(ipk_etc_dir "$pkg")
+  [ -n "$etc" ] && [ -f "$ipk" ] || return 1
+
+  tmp="/tmp/ipk-ex-$$"
+  rm -rf "$tmp"
+  mkdir -p "$tmp" || return 1
+
+  if ! tar -xzf "$ipk" -C "$tmp" 2>/dev/null; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  if [ ! -f "$tmp/data.tar.gz" ]; then
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  # пути в архиве: ./opt/etc/nfqws2/...
+  if tar -xzf "$tmp/data.tar.gz" -C / ".$etc" 2>/dev/null; then
+    :
+  elif tar -xzf "$tmp/data.tar.gz" -C / "${etc#/}" 2>/dev/null; then
+    :
+  else
+    # вытащить весь opt/etc/...
+    tar -xzf "$tmp/data.tar.gz" -C / --wildcards '*/etc/nfqws2/*' 2>/dev/null || \
+    tar -xzf "$tmp/data.tar.gz" -C / --wildcards '*/etc/nfqws/*' 2>/dev/null || true
+  fi
+
+  rm -rf "$tmp"
+  [ -d "$etc" ] || return 1
+  return 0
+}
+
+# Установка локального .ipk
+#
+#  не установлен     → opkg install
+#  стоит другая ver  → opkg install (upgrade 1.3.0→1.3.1)
+#  стоит та же ver   → force-reinstall
+_opkg_install_ipk() {
+  # Как вручную: opkg install /tmp/file.ipk — без лишних --force-*
+  # (force-maintainer/overwrite на Entware ломали распаковку conffiles)
+  local dest="$1" pkg="$2" new_ver="$3"
+  local cur
+
+  refresh_opkg_cache
+
+  if ! is_installed "$pkg"; then
+    info "Чистая установка $pkg $new_ver"
+    opkg install "$dest"
+    return $?
+  fi
+
+  cur=$(pkg_version "$pkg")
+  if [ -n "$cur" ] && [ -n "$new_ver" ] && [ "$cur" != "$new_ver" ]; then
+    info "Обновление $pkg: $cur → $new_ver"
+    opkg install "$dest"
+    return $?
+  fi
+
+  # Та же версия: обычный install даст «up to date» и не тронет файлы
+  info "Та же версия ($cur) — force-reinstall"
+  PKG_UPGRADE=1 opkg install --force-reinstall "$dest"
+  return $?
+}
+
 install_ipk_from_repo() {
-  local label="$1" pkg="$2" base="$3"
-  local meta ver fn url dest repo ok=0
+  # $1=label $2=pkg $3=base $4=version (опционально)
+  local label="$1" pkg="$2" base="$3" ver_hint="${4:-}"
+  local meta ver fn url dest repo ok=0 _c _m _w conf
 
   [ -z "$ARCH" ] && detect_arch
+  conf=$(ipk_conf_path "$pkg")
+  refresh_opkg_cache
 
-  info "Получение сведений о пакете $pkg ..."
-  meta=$(fetch_ipk_meta "$base" "$pkg") || {
-    error "Не удалось определить версию $pkg (индекс и VERSION недоступны)"
-    return 1
-  }
-  ver=$(printf '%s\n' "$meta" | head -1 | cut -f1 | tr -d '\r')
-  fn=$(printf '%s\n' "$meta" | head -1 | cut -f2 | tr -d '\r')
+  if [ -n "$ver_hint" ] && [ "$ver_hint" != "?" ]; then
+    ver="$ver_hint"
+    fn=$(ipk_filename "$pkg" "$ver")
+    info "Пакет $pkg $ver"
+  else
+    info "Получение сведений о пакете $pkg ..."
+    meta=$(fetch_ipk_meta "$base" "$pkg") || {
+      error "Не удалось определить версию $pkg"
+      return 1
+    }
+    ver=$(printf '%s\n' "$meta" | head -1 | cut -f1 | tr -d '\r')
+    fn=$(printf '%s\n' "$meta" | head -1 | cut -f2 | tr -d '\r')
+  fi
   [ -n "$ver" ] && [ -n "$fn" ] || {
     error "Пустые метаданные для $pkg"
     return 1
@@ -1039,20 +1110,34 @@ install_ipk_from_repo() {
 
   dest="/tmp/${fn}"
   rm -f "$dest"
-  info "Скачивание $label $ver ..."
+  info "Скачивание $fn ..."
 
   repo=$(ipk_github_repo "$pkg") || repo=""
-  # releases (ghproxy) раньше github.io
-  for url in     ${repo:+"https://github.com/${repo}/releases/download/v${ver}/${fn}"}     "${base}/${fn}"
+  _c="$CURL_CONNECT_TIMEOUT"; _m="$CURL_MAX_TIME"; _w="$WGET_TIMEOUT"
+  CURL_CONNECT_TIMEOUT=8
+  CURL_MAX_TIME=90
+  WGET_TIMEOUT=90
+
+  # Приоритет: github.com → ghproxy → github.io (с прогрессом)
+  for url in \
+    ${repo:+"https://github.com/${repo}/releases/download/v${ver}/${fn}"} \
+    ${repo:+"https://ghproxy.net/https://github.com/${repo}/releases/download/v${ver}/${fn}"} \
+    "${base}/${fn}" \
+    "https://ghproxy.net/${base}/${fn}"
   do
     [ -n "$url" ] || continue
-    info "URL: $url"
-    if download_file "$url" "$dest" && [ -s "$dest" ]; then
+    printf '%s\n' "${DIM}  ← $url${NC}" >&2
+    if _http_get_file_progress "$url" "$dest" && [ -s "$dest" ]; then
+      info "Скачано ($(( $(wc -c < "$dest" | tr -d ' ') / 1024 )) КБ)"
       ok=1
       break
     fi
     rm -f "$dest"
   done
+
+  CURL_CONNECT_TIMEOUT="$_c"
+  CURL_MAX_TIME="$_m"
+  WGET_TIMEOUT="$_w"
 
   if [ "$ok" -ne 1 ] || [ ! -s "$dest" ]; then
     error "Не удалось скачать $fn"
@@ -1060,24 +1145,36 @@ install_ipk_from_repo() {
     return 1
   fi
 
-  info "Установка: opkg install $dest"
-  if opkg install "$dest"; then
-    info "$label $ver установлен."
-  else
-    warn "opkg install вернул ошибку, пробуем --force-reinstall ..."
-    if opkg install --force-reinstall "$dest"; then
-      info "$label $ver переустановлен."
+  if ! _opkg_install_ipk "$dest" "$pkg" "$ver"; then
+    error "Не удалось установить $fn"
+    rm -f "$dest"
+    return 1
+  fi
+
+  refresh_opkg_cache
+
+  # opkg иногда не кладёт conffiles — докладываем из .ipk
+  if [ -n "$conf" ] && [ ! -f "$conf" ]; then
+    warn "opkg не создал $conf — распаковка из .ipk..."
+    if extract_ipk_etc "$dest" "$pkg" && [ -f "$conf" ]; then
+      info "Конфиги восстановлены из .ipk"
     else
-      error "Не удалось установить $fn"
+      error "После установки нет $conf"
       rm -f "$dest"
       return 1
     fi
   fi
+
+  if [ -n "$conf" ]; then
+    info "$label $ver OK. Конфиг: $conf"
+  else
+    info "$label $ver установлен."
+  fi
+
   rm -f "$dest"
   return 0
 }
 
-# Пункт 3: прямая установка/обновление .ipk
 menu_install_ipk_direct() {
   local v1="?" v2="?" vweb="?" base1 base2 baseweb meta choice
 
@@ -1108,24 +1205,24 @@ menu_install_ipk_direct() {
   read_menu choice
   case "$choice" in
     1)
-      [ "$v1" = "?" ] && { error "Версия nfqws-keenetic неизвестна (индекс недоступен)."; return 1; }
-      install_ipk_from_repo "nfqws-keenetic" "nfqws-keenetic" "$base1" || return 1
+      [ "$v1" = "?" ] && { error "Версия nfqws-keenetic неизвестна."; return 1; }
+      install_ipk_from_repo "nfqws-keenetic" "nfqws-keenetic" "$base1" "$v1" || return 1
       ask_web_install
       ;;
     2)
-      [ "$v2" = "?" ] && { error "Версия nfqws2-keenetic неизвестна (индекс недоступен)."; return 1; }
+      [ "$v2" = "?" ] && { error "Версия nfqws2-keenetic неизвестна."; return 1; }
       if is_installed "nfqws-keenetic"; then
         warn "Обнаружен nfqws-keenetic. Рекомендуется удалить его перед установкой nfqws2."
         if confirm_no "Удалить nfqws-keenetic и веб-интерфейс?"; then
           opkg remove --autoremove nfqws-keenetic-web nfqws-keenetic 2>/dev/null || true
         fi
       fi
-      install_ipk_from_repo "nfqws2-keenetic" "nfqws2-keenetic" "$base2" || return 1
+      install_ipk_from_repo "nfqws2-keenetic" "nfqws2-keenetic" "$base2" "$v2" || return 1
       ask_web_install
       ;;
     3)
-      [ "$vweb" = "?" ] && { error "Версия nfqws-keenetic-web неизвестна (индекс недоступен)."; return 1; }
-      install_ipk_from_repo "nfqws-keenetic-web" "nfqws-keenetic-web" "$baseweb" || return 1
+      [ "$vweb" = "?" ] && { error "Версия nfqws-keenetic-web неизвестна."; return 1; }
+      install_ipk_from_repo "nfqws-keenetic-web" "nfqws-keenetic-web" "$baseweb" "$vweb" || return 1
       info "Адрес: http://<IP-роутера>:90"
       info "Логин/пароль — учётные данные Entware (по умолчанию root / keenetic)"
       ;;
