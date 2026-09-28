@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_VERSION="0.6.76"
+SCRIPT_VERSION="0.6.77"
 
 REPO_URL="https://github.com/rndnaame/nfqws-menu"
 RAW_BASE="https://raw.githubusercontent.com/rndnaame/nfqws-menu/main"
@@ -286,6 +286,14 @@ github_alt_urls() {
       fi
       ;;
     https://api.github.com/*)
+      printf '%s\n' "https://ghproxy.net/${url}"
+      ;;
+    https://github.com/*/releases/download/*)
+      printf '%s\n' "https://ghproxy.net/${url}"
+      ;;
+  esac
+  case "$url" in
+    https://*.github.io/*|http://*.github.io/*)
       printf '%s\n' "https://ghproxy.net/${url}"
       ;;
   esac
@@ -917,12 +925,56 @@ install_nfqws2() {
   ask_web_install
 }
 
-# Метаданные .ipk из Packages index: base_url pkg_name → VERSION\tFILENAME
-# base_url без завершающего /
+# Суффикс архитектуры в имени .ipk
+ipk_arch_suffix() {
+  case "${ARCH:-}" in
+    mipsel)  echo "mipsel-3.4" ;;
+    mips)    echo "mips-3.4" ;;
+    aarch64) echo "aarch64-3.10" ;;
+    x86_64)  echo "x86_64" ;;
+    x86)     echo "x86" ;;
+    *)       echo "${ARCH:-unknown}" ;;
+  esac
+}
+
+ipk_github_repo() {
+  case "$1" in
+    nfqws-keenetic)     echo "nfqws/nfqws-keenetic" ;;
+    nfqws2-keenetic)    echo "nfqws/nfqws2-keenetic" ;;
+    nfqws-keenetic-web) echo "nfqws/nfqws-keenetic-web" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Версия из raw VERSION (fetch_url → зеркала jsDelivr/ghproxy)
+fetch_pkg_version_file() {
+  local repo="$1" ver
+  ver=$(fetch_url "https://raw.githubusercontent.com/${repo}/master/VERSION" 2>/dev/null | tr -d ' \t\r\n' | head -1)
+  [ -n "$ver" ] || return 1
+  printf '%s\n' "$ver"
+}
+
+ipk_filename() {
+  local pkg="$1" ver="$2" suf
+  case "$pkg" in
+    nfqws-keenetic-web)
+      echo "${pkg}_${ver}_all_entware.ipk"
+      ;;
+    *)
+      suf=$(ipk_arch_suffix)
+      echo "${pkg}_${ver}_${suf}.ipk"
+      ;;
+  esac
+}
+
+# Метаданные .ipk: Packages (github.io) → fallback VERSION + имя файла
+# stdout: VERSION<TAB>FILENAME
 fetch_ipk_meta() {
-  local base="$1" pkg="$2" tmp meta
+  local base="$1" pkg="$2" tmp meta ver fn repo
+
   tmp="/tmp/nfqws-pkg-idx-$$"
   rm -f "$tmp" "${tmp}.gz"
+
   if download_file "${base}/Packages" "$tmp" 2>/dev/null; then
     :
   elif download_file "${base}/Packages.gz" "${tmp}.gz" 2>/dev/null; then
@@ -932,62 +984,79 @@ fetch_ipk_meta() {
       zcat "${tmp}.gz" > "$tmp" 2>/dev/null || true
     fi
     rm -f "${tmp}.gz"
+  fi
+
+  if [ -s "$tmp" ]; then
+    meta=$(awk -v pkg="$pkg" '
+      BEGIN { cur=""; ver=""; fn=""; found=0 }
+      /^Package: / {
+        if (found) exit
+        cur=$2; ver=""; fn=""
+      }
+      cur == pkg && /^Version: /  { ver=$2 }
+      cur == pkg && /^Filename: / { fn=$2 }
+      cur == pkg && ver != "" && fn != "" {
+        print ver "\t" fn
+        found=1
+        exit
+      }
+    ' "$tmp" | head -1)
+    rm -f "$tmp"
+    if [ -n "$meta" ]; then
+      printf '%s\n' "$meta"
+      return 0
+    fi
   else
     rm -f "$tmp" "${tmp}.gz"
-    return 1
   fi
-  [ -s "$tmp" ] || { rm -f "$tmp"; return 1; }
-  meta=$(awk -v pkg="$pkg" '
-    BEGIN { cur=""; ver=""; fn=""; found=0 }
-    /^Package: / {
-      if (found) exit
-      cur=$2; ver=""; fn=""
-    }
-    cur == pkg && /^Version: /  { ver=$2 }
-    cur == pkg && /^Filename: / { fn=$2 }
-    cur == pkg && ver != "" && fn != "" {
-      print ver "\t" fn
-      found=1
-      exit
-    }
-  ' "$tmp" | head -1)
-  rm -f "$tmp"
-  [ -n "$meta" ] || return 1
-  # одна строка: VERSION<TAB>FILENAME
-  printf '%s\n' "$meta"
+
+  # fallback: VERSION с GitHub (зеркала)
+  repo=$(ipk_github_repo "$pkg") || return 1
+  ver=$(fetch_pkg_version_file "$repo") || return 1
+  fn=$(ipk_filename "$pkg" "$ver")
+  printf '%s\t%s\n' "$ver" "$fn"
+  return 0
 }
 
-# Скачать .ipk в /tmp и opkg install (download_file: зеркала/туннели).
-# $1=label  $2=package  $3=repo_base (…/mipsel или …/all)
+# Скачать .ipk: github.io → GitHub Releases
 install_ipk_from_repo() {
   local label="$1" pkg="$2" base="$3"
-  local meta ver fn url dest
+  local meta ver fn url dest repo ok=0
 
   [ -z "$ARCH" ] && detect_arch
 
   info "Получение сведений о пакете $pkg ..."
   meta=$(fetch_ipk_meta "$base" "$pkg") || {
-    error "Не удалось прочитать индекс пакетов: ${base}/Packages"
+    error "Не удалось определить версию $pkg (индекс и VERSION недоступны)"
     return 1
   }
   ver=$(printf '%s\n' "$meta" | head -1 | cut -f1 | tr -d '\r')
   fn=$(printf '%s\n' "$meta" | head -1 | cut -f2 | tr -d '\r')
   [ -n "$ver" ] && [ -n "$fn" ] || {
-    error "В индексе нет $pkg"
+    error "Пустые метаданные для $pkg"
     return 1
   }
 
-  url="${base}/${fn}"
   dest="/tmp/${fn}"
+  rm -f "$dest"
   info "Скачивание $label $ver ..."
-  info "URL: $url"
-  if ! download_file "$url" "$dest"; then
-    error "Не удалось скачать $fn"
+
+  repo=$(ipk_github_repo "$pkg") || repo=""
+  for url in \
+    "${base}/${fn}" \
+    ${repo:+"https://github.com/${repo}/releases/download/v${ver}/${fn}"}
+  do
+    [ -n "$url" ] || continue
+    info "URL: $url"
+    if download_file "$url" "$dest" && [ -s "$dest" ]; then
+      ok=1
+      break
+    fi
     rm -f "$dest"
-    return 1
-  fi
-  if [ ! -s "$dest" ]; then
-    error "Скачанный файл пуст: $dest"
+  done
+
+  if [ "$ok" -ne 1 ] || [ ! -s "$dest" ]; then
+    error "Не удалось скачать $fn"
     rm -f "$dest"
     return 1
   fi
@@ -1026,6 +1095,9 @@ menu_install_ipk_direct() {
   [ -z "$v1" ] && v1="?"
   [ -z "$v2" ] && v2="?"
   [ -z "$vweb" ] && vweb="?"
+  if [ "$v1" = "?" ] && [ "$v2" = "?" ] && [ "$vweb" = "?" ]; then
+    warn "Не удалось получить версии (github.io / GitHub). Проверьте сеть или туннель."
+  fi
 
   echo
   printf '%s\n' "${BOLD}── Установка / обновление .ipk (обход DPI) ──${NC}"
