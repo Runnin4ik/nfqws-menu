@@ -96,6 +96,8 @@ ui_apply_lang() {
     ru)
       UI_UTF8=1
       RUN_MARK=" ⚡"
+      UPD_MARK=" ⬆"
+      LBL_UPD_LEGEND="⬆ — доступна новая версия"
       LBL_ARCH="Архитектура"
       LBL_INSTALLED="Установленные компоненты:"
       LBL_NONE="— ничего не установлено —"
@@ -130,6 +132,8 @@ ui_apply_lang() {
       UI_LANG="en"
       UI_UTF8=0
       RUN_MARK=" *"
+      UPD_MARK=" ^"
+      LBL_UPD_LEGEND="^ - a newer version is available"
       LBL_ARCH="Arch"
       LBL_INSTALLED="Installed:"
       LBL_NONE="-- none --"
@@ -164,6 +168,16 @@ ui_apply_lang() {
 }
 
 ui_apply_lang "$(ui_detect_default_lang)"
+
+# --- Проверка новых версий: значения по умолчанию --------------------------
+# Метки и подпись задаёт ui_apply_lang; здесь — только то, что нужно, если
+# отрисовка случится до выбора языка.
+: "${UPD_MARK:= ^}"
+: "${LBL_UPD_LEGEND:=$UPD_MARK - a newer version is available}"
+UPD_TTL="${NFQWS_MENU_UPDATE_TTL:-21600}"   # 6 ч
+UPD_REDRAW=0
+UPD_JOB=""
+MENU_PID=""
 
 menu_change_language() {
   if [ "$UI_LANG" = "ru" ]; then
@@ -708,6 +722,7 @@ print_pkg_info() {
   ver=$(pkg_version "$name")
   [ -z "$ver" ] && ver="?"
   service_is_up "$kind" && mark="$RUN_MARK"
+  mark="$mark$(upd_mark "$name")"
   printf '  %s%-22s%s %s%s\n' "$GREEN" "$name" "$NC" "$ver" "$mark"
   return 0
 }
@@ -716,7 +731,9 @@ print_pkg_info() {
 print_tool_info() {
   local name="$1" info="$2" kind="${3:-}" mark=""
   [ -n "$kind" ] && service_is_up "$kind" && mark="$RUN_MARK"
+  mark="$mark$(upd_mark "$name")"
   printf '  %s%-22s%s %s%s\n' "$GREEN" "$name" "$NC" "$info" "$mark"
+  return 0
 }
 
 show_installed() {
@@ -5112,18 +5129,188 @@ menu_opera_hidden() {
 }
 
 # ---------------------------------------------------------------------------
+# Проверка новых версий: в фоне, чтобы меню открывалось сразу
+# ---------------------------------------------------------------------------
+# Меню не ждёт сеть: версии с сервера тянет отдельный процесс, он кладёт их в
+# кэш и будит меню сигналом USR1, по которому цикл перерисовывает экран. Метки
+# появляются сами через секунду-другую после открытия, а сам экран рисуется
+# мгновенно — в том числе когда GitHub недоступен.
+#
+# В кэше лежат только версии с сервера, без сравнения: сравнение с
+# установленными делается при отрисовке, поэтому после обновления метка
+# исчезает сразу и перепроверка для этого не нужна.
+UPD_CACHE="${CACHE_DIR}/updates.cache"
+
+# Версия скрипта меню: первые 2 КБ файла через зеркала — 200 КБ тянуть незачем.
+upd_menu_version() {
+  local url alt tmp ver
+  command -v curl >/dev/null 2>&1 || return 1
+  url="${RAW_BASE}/nfqws-menu.sh"
+  tmp="/tmp/nfqws-menu-upd-$$"
+  for alt in $(github_alt_urls "$url"); do
+    curl -fsS -m 8 -r 0-2047 "$alt" -o "$tmp" 2>/dev/null || continue
+    ver=$(extract_script_version "$tmp") || ver=""
+    if [ -n "$ver" ]; then
+      rm -f "$tmp"
+      printf '%s' "$ver"
+      return 0
+    fi
+  done
+  rm -f "$tmp"
+  return 1
+}
+
+# Тег последнего релиза из редиректа releases/latest: без GitHub API и jsonfilter.
+upd_release_tag() {   # $1 = owner/repo
+  local url alt loc
+  command -v curl >/dev/null 2>&1 || return 1
+  url="https://github.com/$1/releases/latest"
+  for alt in $(github_alt_urls "$url"); do
+    loc=$(curl -sS -m 8 -o /dev/null -w '%{redirect_url}' "$alt" 2>/dev/null) || continue
+    case "$loc" in
+      */releases/tag/*)
+        printf '%s' "${loc##*/releases/tag/}" | sed 's/^v//'
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+# Версии с сервера в кэш (работает в фоне). Проверяются только установленные
+# пакеты: у остальных сравнивать не с чем.
+upd_check_bg() {
+  local tmp="${UPD_CACHE}.tmp.$$" ver pair
+  mkdir -p "$CACHE_DIR" 2>/dev/null || true
+  : > "$tmp" || return 1
+  ver=$(upd_menu_version 2>/dev/null) || ver=""
+  [ -n "$ver" ] && printf 'menu %s\n' "$ver" >> "$tmp"
+  for pair in \
+    nfqws-keenetic:nfqws/nfqws-keenetic \
+    nfqws2-keenetic:nfqws/nfqws2-keenetic \
+    nfqws-keenetic-web:nfqws/nfqws-keenetic-web
+  do
+    is_installed "${pair%%:*}" || continue
+    ver=$(fetch_pkg_version_file "${pair#*:}" 2>/dev/null) || ver=""
+    [ -n "$ver" ] && printf '%s %s\n' "${pair%%:*}" "$ver" >> "$tmp"
+  done
+  if is_tg_ws_proxy_rs_installed; then
+    ver=$(upd_release_tag "valnesfjord/tg-ws-proxy-rs" 2>/dev/null) || ver=""
+    [ -n "$ver" ] && printf 'tg-ws-proxy-rs %s\n' "$ver" >> "$tmp"
+  fi
+  # Время проверки пишется всегда: иначе неудачный прогон повторялся бы на
+  # каждом входе в меню.
+  printf 'checked %s\n' "$(date +%s)" >> "$tmp"
+  mv "$tmp" "$UPD_CACHE" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  # Меню могло уже завершиться, а PID — достаться другому процессу: сверяем
+  # cmdline, прежде чем слать сигнал.
+  if [ -r "/proc/${MENU_PID}/cmdline" ] &&
+     tr -d '\0' < "/proc/${MENU_PID}/cmdline" 2>/dev/null | grep -q 'nfqws-menu'
+  then
+    kill -USR1 "$MENU_PID" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# Кэш моложе TTL — сеть не нужна.
+upd_cache_fresh() {
+  local checked now
+  [ -f "$UPD_CACHE" ] || return 1
+  checked=$(sed -n 's/^checked //p' "$UPD_CACHE" 2>/dev/null | head -1)
+  case "$checked" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  now=$(date +%s)
+  [ $((now - checked)) -lt "$UPD_TTL" ]
+}
+
+upd_cleanup() {
+  [ -n "${UPD_JOB:-}" ] && kill "$UPD_JOB" 2>/dev/null
+  rm -f "${UPD_CACHE}.tmp.$$" 2>/dev/null
+  return 0
+}
+
+# Один раз при входе в меню: подписка на сигнал и, если кэш устарел, фоновый
+# процесс. Кэш свежий — метки рисуются сразу, без единого запроса.
+upd_start() {
+  MENU_PID=$$
+  trap 'UPD_REDRAW=1' USR1
+  trap 'upd_cleanup' EXIT
+  upd_cache_fresh && return 0
+  ( upd_check_bg ) </dev/null >/dev/null 2>&1 &
+  UPD_JOB=$!
+  return 0
+}
+
+# Версия с сервера для ключа (пусто — данных нет).
+upd_remote() {
+  [ -f "$UPD_CACHE" ] || return 0
+  sed -n "s/^$1 //p" "$UPD_CACHE" 2>/dev/null | head -1
+}
+
+# Установленная версия для ключа.
+upd_local() {
+  case "$1" in
+    menu)           printf '%s' "$SCRIPT_VERSION" ;;
+    tg-ws-proxy-rs) tg_ws_proxy_rs_version 2>/dev/null ;;
+    *)              pkg_version "$1" 2>/dev/null ;;
+  esac
+  return 0
+}
+
+# Метка к строке: « ⬆1.2.7» — версия на сервере отличается от установленной.
+upd_mark() {
+  local remote installed
+  remote=$(upd_remote "$1")
+  [ -n "$remote" ] || return 0
+  installed=$(upd_local "$1")
+  [ "$remote" = "$installed" ] && return 0
+  printf '%s%s' "$UPD_MARK" "$remote"
+  return 0
+}
+
+# Подпись к меткам — печатается, только если хоть одна метка есть.
+upd_legend() {
+  local key rest
+  [ -f "$UPD_CACHE" ] || return 0
+  while read -r key rest; do
+    case "$key" in ''|checked) continue ;; esac
+    [ -n "$(upd_mark "$key")" ] || continue
+    printf '  %s%s%s\n' "$DIM" "$LBL_UPD_LEGEND" "$NC"
+    return 0
+  done < "$UPD_CACHE"
+  return 0
+}
+
+# Чтение выбора с оглядкой на фоновую проверку. READ_RC: 0 — ввод получен,
+# 1 — перерисовать (пришла проверка), 2 — stdin закрыт (меню завершается).
+read_choice() {
+  READ_RC=0
+  read_menu "$1" && return 0
+  if [ "$UPD_REDRAW" = 1 ]; then
+    UPD_REDRAW=0
+    READ_RC=1
+    return 1
+  fi
+  READ_RC=2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Главное меню
 # ---------------------------------------------------------------------------
 main_menu() {
+  upd_start
   while true; do
     clear 2>/dev/null || true
     echo
     printf '%s\n' "${BOLD}${BLUE}========================================${NC}"
-    printf '%s\n' "${BOLD}${BLUE}     NFQWS-MENU (Entware)  v${SCRIPT_VERSION}${NC}"
+    printf '%s\n' "${BOLD}${BLUE}     NFQWS-MENU (Entware)  v${SCRIPT_VERSION}$(upd_mark menu)${NC}"
     printf '%s\n' "${BOLD}${BLUE}========================================${NC}"
     echo
     detect_arch
     show_installed
+    upd_legend
     printf '%s\n' "${CYAN}${BOLD}[::]  ${LBL_COMPONENTS}${NC}"
     echo "      1.  $LBL_1"
     echo
@@ -5153,7 +5340,14 @@ main_menu() {
     echo "      00. $LBL_00"
     echo
     ask "$LBL_PROMPT"
-    read_menu choice
+    UPD_REDRAW=0
+    if read_choice choice; then
+      :   # обычный путь: выбор разбирается ниже
+    elif [ "$READ_RC" = 1 ]; then
+      continue    # пришла фоновая проверка версий — перерисуем с метками
+    else
+      exit 1      # stdin закрыт: как и раньше, выходим из меню
+    fi
 
     # || true — при set -e любой return 1 из пункта не должен завершать скрипт
     case "$choice" in
@@ -5189,7 +5383,14 @@ main_menu() {
     drain_stdin
     echo
     ask "$LBL_BACK"
-    read_menu _
+    UPD_REDRAW=0
+    if read_choice _; then
+      :
+    elif [ "$READ_RC" = 1 ]; then
+      continue
+    else
+      exit 1
+    fi
   done
 }
 
